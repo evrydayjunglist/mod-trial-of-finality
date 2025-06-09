@@ -1,8 +1,5 @@
--- Drop table if it exists, for idempotency during testing/re-application
-DROP TABLE IF EXISTS `trial_of_finality_log`;
-
 -- Create table for logging Trial of Finality events
-CREATE TABLE `trial_of_finality_log` (
+CREATE TABLE IF NOT EXISTS `trial_of_finality_log` (
     `log_id` INT UNSIGNED NOT NULL AUTO_INCREMENT,
     `event_timestamp` TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     `event_type` VARCHAR(50) NOT NULL COMMENT 'E.g., TRIAL_START, PLAYER_DEATH, WAVE_START, TRIAL_SUCCESS, TRIAL_FAILURE, GM_COMMAND',

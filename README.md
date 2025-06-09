@@ -31,16 +31,13 @@
     *   Place the entire `mod_trial_of_finality` directory into your AzerothCore's `modules` directory.
 3.  **CMake:**
     *   Re-run CMake and rebuild your server.
-4.  **SQL Execution:**
-    *   Apply all SQL files located in the `mod_trial_of_finality/sql/` directory to your `acore_world` database. The recommended order is:
-        1.  `item_trial_token.sql` (Defines the Trial Token item)
-        2.  `title_reward.sql` (Defines the "Conqueror of Finality" title)
-        3.  `npc_fateweaver_arithos_template.sql` (Creature template for the trial initiator NPC)
-        4.  `npc_fateweaver_arithos_spawn.sql` (Spawns Fateweaver Arithos)
-        5.  `npc_trial_announcer_template.sql` (Creature template for the Trial Announcer NPC)
-        6.  `log_table_trial_of_finality.sql` (Creates the database table for logging trial events)
-        7.  `character_trial_finality_status.sql` (Creates the table to store perma-death status)
-        8.  *(Optional)* If you customize `TrialOfFinality.NpcPools.*` in the `.conf` file to use *new custom creature IDs* that don't exist in your database, you will need to create SQL entries for those specific custom creatures.
+3.  **Database Setup:**
+    *   This module uses AzerothCore's integrated SQL update system.
+    *   Ensure the module is correctly placed in your `modules` directory and you have re-run CMake and rebuilt your server as per steps 1 & 2.
+    *   Upon the next startup, the `worldserver` will automatically detect and apply the necessary SQL changes from the module's `data/sql/updates/applied/world/` directory.
+    *   Monitor your `worldserver` console output during its first startup after adding the module. Look for messages indicating SQL updates are being applied (e.g., "Applying MANGOS SQL update 'YYYY_MM_DD_RR_tof_...'") and check for any errors.
+    *   The required database tables (`trial_of_finality_log`, `character_trial_finality_status`) and initial data (items, titles, NPC templates) will be automatically created.
+    *   *(Optional)* If you customize `TrialOfFinality.NpcPools.*` in the `.conf` file to use *new custom creature IDs* that don't exist in your database, you will still need to create SQL entries for those specific custom creatures yourself. The module does not provide SQL for arbitrary custom NPCs you might choose.
 
 ## 4. Essential Configuration (`mod_trial_of_finality.conf`)
 

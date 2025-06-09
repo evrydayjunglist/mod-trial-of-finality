@@ -146,6 +146,10 @@ Controls the NPC cheering feature upon successful trial completion. This uses a 
 
 ## 4. Database Schema
 
+### Schema Deployment
+
+The SQL scripts for creating the necessary database tables (`trial_of_finality_log`, `character_trial_finality_status`) and inserting initial module data (item templates, title rewards, NPC templates) are managed through AzerothCore's standard module SQL update system. These files are located in the module's `data/sql/updates/applied/world/` directory (e.g., `2024_01_01_00_tof_log_table.sql`) and are automatically executed by the `worldserver` upon startup. Refer to the main [README.md](../README.md) for user-facing installation instructions.
+
 The module uses two custom database tables in the `acore_world` database.
 
 ### `trial_of_finality_log` Table
