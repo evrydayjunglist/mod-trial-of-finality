@@ -63,6 +63,13 @@ Key configuration options (see the `.conf` file for default values and comments)
 *   `TrialOfFinality.AnnounceWinners.World.MessageFormat`: String format for the world announcement. Placeholders: `{group_leader}`, `{player_list}`.
 *   `TrialOfFinality.PermaDeath.ExemptGMs`: (true/false) If `true`, Game Master accounts (security level `SEC_GAMEMASTER` or higher) will not have the perma-death flag set in the database if they fail the trial. This allows GMs to test the mechanics without risk to their characters. Default: `true`.
 
+### NPC Wave Creature Pools
+These settings allow you to define the pools of creature entry IDs used for each difficulty tier of the trial waves. IDs must be comma-separated. It is crucial to customize these pools with valid creature IDs suitable for your server's balance. The module will log errors and may fail to spawn waves if pools are misconfigured or IDs are invalid.
+
+*   `TrialOfFinality.NpcPools.Easy`: Comma-separated list of creature entry IDs for easy waves (typically waves 1-2). Default: (placeholder IDs from original hardcoded list).
+*   `TrialOfFinality.NpcPools.Medium`: Comma-separated list of creature entry IDs for medium waves (typically waves 3-4). Default: (placeholder IDs from original hardcoded list).
+*   `TrialOfFinality.NpcPools.Hard`: Comma-separated list of creature entry IDs for hard waves (typically wave 5). Default: (placeholder IDs from original hardcoded list).
+
 ### NPC Cheering Settings
 
 These settings control the behavior of NPCs cheering in cities when a trial is successfully completed. This feature uses a cached list of NPCs generated at server startup.
@@ -78,15 +85,11 @@ These settings control the behavior of NPCs cheering in cities when a trial is s
 
 The `AURA_ID_TRIAL_PERMADEATH` (constant `40000` in C++) is no longer the primary mechanism for persistent perma-death. It might be used for immediate in-session effects or visual cues if necessary, but the authoritative source for a character's perma-death status is the `character_trial_finality_status` database table.
 
-### Placeholder Creature ID Pools for Waves
-The module now spawns distinct, randomly selected NPCs for each wave from predefined pools. You **must** ensure the creature IDs listed in these pools in `src/mod_trial_of_finality.cpp` correspond to actual creature templates in your database, or update the pools with valid IDs. Each pool should ideally contain at least 5-10 distinct creature IDs appropriate for the difficulty tier.
-
-Default placeholder pools in `src/mod_trial_of_finality.cpp` are:
-*   `POOL_WAVE_CREATURES_EASY`: Contains IDs like `70001` through `70010`. Intended for Waves 1 & 2.
-*   `POOL_WAVE_CREATURES_MEDIUM`: Contains IDs like `70011` through `70020`. Intended for Waves 3 & 4. These also receive a 20% health boost.
-*   `POOL_WAVE_CREATURES_HARD`: Contains IDs like `70021` through `70030`. Intended for Wave 5. These also receive a 50% health boost.
-
-**It is crucial to customize these creature ID pools with entries suitable for your server's balance and available custom NPCs.**
+### Configurable Creature ID Pools for Waves
+The creature entry IDs for NPCs spawned in each wave are now configurable via the `mod_trial_of_finality.conf` file (see `TrialOfFinality.NpcPools.Easy`, `TrialOfFinality.NpcPools.Medium`, `TrialOfFinality.NpcPools.Hard` options).
+You **must** ensure the creature IDs listed in these configuration settings correspond to actual creature templates in your database.
+The default values in the configuration file are the original placeholder IDs (e.g., 70001-70010 for Easy).
+**It is crucial to customize these creature ID pools with entries suitable for your server's balance and available custom NPCs.** Misconfiguration can lead to errors or empty waves. Each pool should ideally contain at least 5-10 distinct creature IDs appropriate for its difficulty tier to ensure variety.
 
 ## 5. Gameplay Mechanics
 
@@ -155,8 +158,8 @@ Access to commands requires `SEC_GAMEMASTER` level.
 
 ## 8. Developer Notes & Future Considerations
 *   The perma-death mechanism now uses a database flag in the `character_trial_finality_status` table for persistence. This replaces the previous system that relied solely on `AURA_ID_TRIAL_PERMADEATH` (constant `40000`) for long-term status. The aura might still be used for immediate in-session effects or as a visual cue but is cleaned up/secondary to the DB flag.
-*   Creature entries for waves (`70001`-`70030`) are placeholders. Update these in `src/mod_trial_of_finality.cpp` or create these custom NPCs.
+*   Creature entries for waves are now configurable in `mod_trial_of_finality.conf`. Ensure these are updated from the default placeholders (e.g., `70001`-`70030`) to valid creature IDs in your database.
 *   Wave difficulty scaling currently adjusts NPC count and provides a basic health multiplier for later waves. More complex stat scaling or varied NPC abilities per wave could be added.
-*   Consider randomizing NPC types for waves from predefined lists to enhance replayability.
+*   Randomization of NPC types for waves is achieved by shuffling the configured creature ID pools for each spawn event.
 *   World announcements for trial winners have been added (see configuration options).
 ```

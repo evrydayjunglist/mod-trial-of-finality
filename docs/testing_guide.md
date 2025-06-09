@@ -23,7 +23,7 @@ Before testing, ensure you have the following:
     *   `trial_of_finality_log` (for event logging)
     *   `character_trial_finality_status` (stores the `is_perma_failed` flag and timestamp)
     *   `character_aura` (to verify `AURA_ID_TRIAL_PERMADEATH` (currently 40000) is cleaned up if it was applied).
-*   **Configuration Awareness:** Be aware of the `TrialOfFinality.PermaDeath.ExemptGMs` setting in `mod_trial_of_finality.conf`. For GMs to test the full perma-death loop on their own characters (including login kick), this option might need to be temporarily set to `false`.
+*   **Configuration Awareness:** Be aware of the `TrialOfFinality.PermaDeath.ExemptGMs` and NPC Wave Pool settings (`TrialOfFinality.NpcPools.*`) in `mod_trial_of_finality.conf`. For GMs to test the full perma-death loop on their own characters, `PermaDeath.ExemptGMs` might need to be temporarily set to `false`. Testers may also need to adjust NPC pools to verify specific creature interactions or test edge cases like empty/invalid pools.
 
 ## 3. Testing Areas
 
@@ -59,10 +59,18 @@ Before testing, ensure you have the following:
 *   **B.2. NPC Count Scaling:**
     *   Test with different group sizes (e.g., 1 player, 3 players, 5 players).
     *   Verify the number of NPCs spawned per wave scales correctly according to the number of *active* (not perma-deathed) players.
-*   **B.3. Randomized & Distinct NPC Selection:**
-    *   Over multiple trials, confirm that NPCs for each wave are randomly selected from the correct pools (Easy, Medium, Hard).
-    *   Ensure each NPC spawned within a single wave is of a *distinct* creature ID (no duplicates in the same wave).
-*   **B.4. NPC Scaling & Health Multipliers:**
+*   **B.3. Randomized & Distinct NPC Selection from Configured Pools:**
+    *   Verify that NPCs for each wave (Easy: 1-2, Medium: 3-4, Hard: 5) are randomly selected from the creature ID lists defined in `TrialOfFinality.NpcPools.Easy`, `TrialOfFinality.NpcPools.Medium`, and `TrialOfFinality.NpcPools.Hard` in the `.conf` file.
+    *   Ensure each NPC spawned within a single wave is of a *distinct* creature ID from the configured pool.
+    *   Test with pools of varying sizes, including pools smaller than `NUM_SPAWNS_PER_WAVE` (or the calculated `numCreaturesToSpawn`), to ensure the spawn count adjustment logic works correctly (spawns only up to the number of unique IDs available in the pool).
+*   **B.4. Misconfigured NPC Pools:**
+    *   **Empty Pool String:** Set one pool to an empty string (e.g., `TrialOfFinality.NpcPools.Easy = ""`).
+        *   Expected: When a wave requiring this pool is reached, the trial should fail gracefully, logging an error about the empty pool. No creatures should spawn for this wave.
+    *   **Invalid IDs:** Configure a pool with some invalid creature IDs (e.g., non-numeric, zero, non-existent in `creature_template`) mixed with valid ones.
+        *   Expected: Valid NPCs from the pool are spawned. Invalid/non-existent IDs are skipped, and errors are logged for each skipped ID.
+    *   **All Invalid IDs:** Configure a pool with only invalid or non-existent creature IDs.
+        *   Expected: Similar to an empty pool string, the trial should fail for waves requiring this pool, with appropriate error logs.
+*   **B.5. NPC Scaling & Health Multipliers:**
     *   Verify NPC levels are set to the `highestLevelAtStart` of the group.
     *   Verify health multipliers are applied correctly for Medium (+20%) and Hard (+50%) waves. Use `.debug hostil` and `.info` or damage meters to check effective health.
 *   **B.5. NPC Aggression & Combat:**
@@ -214,7 +222,7 @@ Balancing is crucial for making the Trial of Finality engaging and appropriately
 
 *   **A. NPC Difficulty:**
     *   **Creature Stats:** For various group sizes and average player levels, assess if NPC health, damage output, and armor are appropriate for each wave. Use combat logs and GM commands (`.modify hp`, `.modify damage`) for live adjustments and testing.
-    *   **Creature Pools:** Review the creature IDs in `POOL_WAVE_CREATURES_EASY/MEDIUM/HARD`. Are these creatures thematically appropriate? Do they have abilities that are too punishing or trivial? (Server admins should customize these pools).
+    *   **Creature Pools (Configured):** Review the creature IDs configured in `TrialOfFinality.NpcPools.Easy/Medium/Hard` in the `.conf` file. Are these creatures thematically appropriate for their difficulty tier? Do their abilities create a balanced challenge? (This is a server admin task but crucial for testing feedback).
     *   **Health Multipliers:** Is the +20% for medium waves and +50% for hard waves a good baseline? Does it provide a noticeable but fair increase in difficulty?
 *   **B. Wave Progression:**
     *   **Difficulty Curve:** Does the challenge ramp up smoothly from Wave 1 to Wave 5? Or are there sudden spikes or drops in difficulty?

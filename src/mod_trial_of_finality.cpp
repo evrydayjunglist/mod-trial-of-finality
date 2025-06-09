@@ -118,10 +118,10 @@ void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* playe
     );
 }
 
-// --- Creature ID Pools for Waves ---
-const std::vector<uint32> POOL_WAVE_CREATURES_EASY = { 70001, 70002, 70003, 70004, 70005, 70006, 70007, 70008, 70009, 70010 };
-const std::vector<uint32> POOL_WAVE_CREATURES_MEDIUM = { 70011, 70012, 70013, 70014, 70015, 70016, 70017, 70018, 70019, 70020 };
-const std::vector<uint32> POOL_WAVE_CREATURES_HARD = { 70021, 70022, 70023, 70024, 70025, 70026, 70027, 70028, 70029, 70030 };
+// --- Creature ID Pools for Waves (Now loaded from config) ---
+std::vector<uint32> NpcPoolEasy;
+std::vector<uint32> NpcPoolMedium;
+std::vector<uint32> NpcPoolHard;
 
 // --- Wave Spawn Positions ---
 const Position WAVE_SPAWN_POSITIONS[5] = {
@@ -294,7 +294,105 @@ void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32
 
 void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId) { /* ... (as of Step 8c) ... */ }
 
-void TrialManager::SpawnActualWave(uint32 groupId) { /* ... (as of Enhancement 1) ... */ }
+void TrialManager::SpawnActualWave(uint32 groupId) {
+    ActiveTrialInfo* currentTrial = GetActiveTrialInfo(groupId);
+    if (!currentTrial) {
+        sLog->outError("sys", "[TrialOfFinality] SpawnActualWave called for group %u but no ActiveTrialInfo found.", groupId);
+        return;
+    }
+
+    Map* trialMap = sMapMgr->FindMap(ArenaMapID, 0);
+    if (!trialMap) {
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Could not find trial map %u to spawn wave.", groupId, currentTrial->currentWave, ArenaMapID);
+        FinalizeTrialOutcome(groupId, false, "Internal error: Trial map not found for wave spawn.");
+        return;
+    }
+
+    uint32 activePlayers = 0;
+    for (const auto& memberGuid : currentTrial->memberGuids) {
+        if (!currentTrial->permanentlyFailedPlayerGuids.count(memberGuid)) {
+            Player* player = ObjectAccessor::FindPlayer(memberGuid);
+            if (player && player->IsAlive() && !currentTrial->downedPlayerGuids.count(memberGuid)) { // Also check not downed for this wave
+                activePlayers++;
+            }
+        }
+    }
+    if (activePlayers == 0 && !currentTrial->memberGuids.empty()) { // Should be caught by other checks, but as a safeguard
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: No active players left to spawn wave for. Finalizing trial.", groupId, currentTrial->currentWave);
+        FinalizeTrialOutcome(groupId, false, "All players defeated or disconnected before wave " + std::to_string(currentTrial->currentWave) + " could spawn.");
+        return;
+    }
+
+    uint32 numCreaturesToSpawn = std::min(NUM_SPAWNS_PER_WAVE, activePlayers + 1); // Example: 1 player -> 2 mobs, up to max NUM_SPAWNS_PER_WAVE
+    numCreaturesToSpawn = std::max(numCreaturesToSpawn, 1u); // Ensure at least 1 creature spawns if activePlayers > 0
+
+    const std::vector<uint32>* currentWaveNpcPool = nullptr;
+    float healthMultiplier = 1.0f;
+
+    if (currentTrial->currentWave <= 2) { // Waves 1-2: Easy
+        currentWaveNpcPool = &ModTrialOfFinality::NpcPoolEasy;
+    } else if (currentTrial->currentWave <= 4) { // Waves 3-4: Medium
+        currentWaveNpcPool = &ModTrialOfFinality::NpcPoolMedium;
+        healthMultiplier = 1.2f; // 20% health boost
+    } else { // Wave 5: Hard
+        currentWaveNpcPool = &ModTrialOfFinality::NpcPoolHard;
+        healthMultiplier = 1.5f; // 50% health boost
+    }
+
+    if (!currentWaveNpcPool || currentWaveNpcPool->empty()) {
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Cannot spawn wave. NPC pool for this difficulty is empty or not configured correctly.",
+            groupId, currentTrial->currentWave);
+        FinalizeTrialOutcome(groupId, false, "Internal error: NPC pool empty for wave " + std::to_string(currentTrial->currentWave));
+        return;
+    }
+
+    if (numCreaturesToSpawn > currentWaveNpcPool->size()) {
+        sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Requested %u distinct NPCs, but pool only has %lu. Spawning %lu instead.",
+            groupId, currentTrial->currentWave, numCreaturesToSpawn, currentWaveNpcPool->size(), currentWaveNpcPool->size());
+        numCreaturesToSpawn = currentWaveNpcPool->size();
+    }
+    if (numCreaturesToSpawn == 0 && !currentWaveNpcPool->empty()){ // If pool is not empty, but we decided to spawn 0 (e.g. activePlayers was 0 but somehow we reached here)
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Calculated numCreaturesToSpawn is 0, though pool is not empty. This should not happen if activePlayers > 0.", groupId, currentTrial->currentWave);
+        FinalizeTrialOutcome(groupId, false, "Internal error: Calculated 0 creatures to spawn for wave " + std::to_string(currentTrial->currentWave));
+        return;
+    }
+
+
+    std::vector<uint32> selectedNpcEntries = *currentWaveNpcPool; // Copy the pool
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(selectedNpcEntries.begin(), selectedNpcEntries.end(), g); // Shuffle to get random distinct NPCs
+
+    sLog->outMessage("sys", "[TrialOfFinality] Group %u, Wave %d: Spawning %u creatures. Highest Lvl: %u. Health Multi: %.2f",
+        groupId, currentTrial->currentWave, numCreaturesToSpawn, currentTrial->highestLevelAtStart, healthMultiplier);
+    currentTrial->activeMonsters.clear();
+
+    for (uint32 i = 0; i < numCreaturesToSpawn; ++i) {
+        uint32 creatureEntry = selectedNpcEntries[i];
+        const Position& spawnPos = WAVE_SPAWN_POSITIONS[i % NUM_SPAWNS_PER_WAVE]; // Use modulo in case numCreaturesToSpawn > NUM_SPAWN_POSITIONS (though capped by pool size)
+
+        if (Creature* creature = trialMap->SummonCreature(creatureEntry, spawnPos, TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 3600 * 1000)) {
+            creature->SetLevel(currentTrial->highestLevelAtStart);
+            if (healthMultiplier > 1.0f) {
+                creature->SetMaxHealth(uint32(creature->GetMaxHealth() * healthMultiplier));
+                creature->SetHealth(creature->GetMaxHealth());
+            }
+            // Make creatures aggressive or link them if needed by AI or scripts
+            // creature->SetReactState(REACT_AGGRESSIVE); // Example
+            currentTrial->activeMonsters.insert(creature->GetGUID());
+            sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Spawned NPC %u (GUID %s) at %f,%f,%f",
+                groupId, currentTrial->currentWave, creatureEntry, creature->GetGUID().ToString().c_str(), spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
+        } else {
+            sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn NPC %u at %f,%f,%f",
+                groupId, currentTrial->currentWave, creatureEntry, spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
+        }
+    }
+     if (currentTrial->activeMonsters.empty() && numCreaturesToSpawn > 0) {
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn ANY monsters despite requesting %u. Finalizing trial.", groupId, currentTrial->currentWave, numCreaturesToSpawn);
+        FinalizeTrialOutcome(groupId, false, "Internal error: Failed to spawn any NPCs for wave " + std::to_string(currentTrial->currentWave));
+        return;
+    }
+}
 
 void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) { /* ... (as of Step 8a) ... */ }
 
@@ -644,6 +742,71 @@ public:
             sLog->outMessage("sys", "[TrialOfFinality] No City Zone IDs configured for cheering NPCs, cache not populated.");
         }
 
+        // Helper lambda for parsing NPC pool strings
+        auto parseNpcPoolString = [](const std::string& poolStr, const std::string& poolName) -> std::vector<uint32> {
+            std::vector<uint32> pool;
+            if (poolStr.empty()) {
+                sLog->outWarn("sys", "[TrialOfFinality] NPC Pool '%s' is empty or not found in configuration. Using empty pool.", poolName.c_str());
+                return pool;
+            }
+
+            std::stringstream ss(poolStr);
+            std::string item;
+            int validCount = 0;
+            int invalidCount = 0;
+            while (getline(ss, item, ',')) {
+                // Trim whitespace from item
+                size_t first = item.find_first_not_of(" \t\n\r\f\v");
+                if (std::string::npos == first) continue; // item is all whitespace
+                size_t last = item.find_last_not_of(" \t\n\r\f\v");
+                item = item.substr(first, (last - first + 1));
+
+                if (item.empty()) continue;
+
+                try {
+                    unsigned long id_ul = std::stoul(item);
+                    if (id_ul == 0 || id_ul > UINT32_MAX) {
+                        sLog->outError("sys", "[TrialOfFinality] Invalid Creature ID '%s' (out of range or zero) in NPC Pool '%s'. Skipping.", item.c_str(), poolName.c_str());
+                        invalidCount++;
+                        continue;
+                    }
+                    CreatureTemplate const* cInfo = sObjectMgr->GetCreatureTemplate(static_cast<uint32>(id_ul));
+                    if (!cInfo) {
+                        sLog->outError("sys", "[TrialOfFinality] Creature ID %lu in NPC Pool '%s' does not exist in creature_template. Skipping.", id_ul, poolName.c_str());
+                        invalidCount++;
+                        continue;
+                    }
+                    pool.push_back(static_cast<uint32>(id_ul));
+                    validCount++;
+                } catch (const std::invalid_argument& ia) {
+                    sLog->outError("sys", "[TrialOfFinality] Invalid Creature ID '%s' (not a number) in NPC Pool '%s'. Skipping. Error: %s", item.c_str(), poolName.c_str(), ia.what());
+                    invalidCount++;
+                } catch (const std::out_of_range& oor) {
+                    sLog->outError("sys", "[TrialOfFinality] Creature ID '%s' (out of range for stoul) in NPC Pool '%s'. Skipping. Error: %s", item.c_str(), poolName.c_str(), oor.what());
+                    invalidCount++;
+                }
+            }
+            sLog->outDetail("[TrialOfFinality] Loaded %d valid NPCs for pool '%s' (encountered %d invalid or non-existent entries).", validCount, poolName.c_str(), invalidCount);
+            if (pool.empty() && validCount == 0 && invalidCount == 0 && !poolStr.empty()){
+                 sLog->outWarn("sys", "[TrialOfFinality] NPC Pool '%s' was configured as '%s' but resulted in an empty pool after parsing (check for formatting issues like trailing commas).", poolName.c_str(), poolStr.c_str());
+            } else if (pool.empty() && (validCount > 0 || invalidCount > 0)) {
+                 sLog->outError("sys", "[TrialOfFinality] NPC Pool '%s' is empty after processing entries. Trial may not function correctly if this pool is used.", poolName.c_str());
+            }
+            return pool;
+        };
+
+        // Load NPC Pools from configuration
+        NpcPoolEasy.clear();
+        NpcPoolMedium.clear();
+        NpcPoolHard.clear();
+
+        std::string easyPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Easy", "70001,70002,70003,70004,70005"); // Default reduced for brevity
+        std::string mediumPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Medium", "70011,70012,70013,70014,70015");
+        std::string hardPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Hard", "70021,70022,70023,70024,70025");
+
+        NpcPoolEasy = parseNpcPoolString(easyPoolStr, "Easy");
+        NpcPoolMedium = parseNpcPoolString(mediumPoolStr, "Medium");
+        NpcPoolHard = parseNpcPoolString(hardPoolStr, "Hard");
 
         if (!FateweaverArithosEntry || !TrialTokenEntry || !AnnouncerEntry || !TitleRewardID) {
             sLog->outError("sys", "Trial of Finality: Critical EntryID (NPC, Item, Title) not configured. Disabling module functionality.");
