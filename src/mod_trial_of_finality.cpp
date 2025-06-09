@@ -537,8 +537,7 @@ class ModPlayerScript : public PlayerScript
 public:
     ModPlayerScript() : PlayerScript("ModTrialOfFinalityPlayerScript") {}
 
-    // Called from NPC gossip after validation passes
-    bool InitiateTrial(Player* leader)
+    void OnLogin(Player* player) override
     {
         if (!ModuleEnabled || !player || !player->GetSession()) return;
 
@@ -596,48 +595,6 @@ public:
             LogTrialDbEvent(TRIAL_EVENT_STRAY_TOKEN_REMOVED,
                             0, player, 0, 0, "Stray token removed on login.");
         }
-
-        StartFirstWave(group->GetId()); // Kick off the first wave
-        return true;
-    }
-
-    void StartFirstWave(uint32 groupId) {
-        ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-        if (!trialInfo) {
-            sLog->outError("sys", "[TrialOfFinality] StartFirstWave: Could not find active trial for group %u", groupId);
-            return;
-        }
-
-        trialInfo->currentWave = 1; // Set current wave to 1
-        sLog->outMessage("sys", "[TrialOfFinality] Group %u starting processing for wave %d.", groupId, trialInfo->currentWave);
-
-        Map* trialMap = sMapMgr->FindMap(ArenaMapID, 0); // Get map again
-        if (!trialMap) {
-            sLog->outError("sys", "[TrialOfFinality] StartFirstWave: Could not find map %u for group %u", ArenaMapID, groupId);
-            // TODO: What to do here? Cleanup?
-            return;
-        }
-
-        if (Creature* announcer = trialMap->GetCreature(trialInfo->announcerGuid)) {
-             if (npc_trial_announcer_ai* ai = CAST_AI(npc_trial_announcer_ai*, announcer->AI())) {
-                uint32 initialDelayMs = 5000; // 5 seconds delay before first wave spawn
-                ai->AnnounceAndSpawnWave(trialInfo->currentWave, initialDelayMs);
-                sLog->outDetail("[TrialOfFinality] Group %u: Announcer told to announce wave %d with delay %u ms.", groupId, trialInfo->currentWave, initialDelayMs);
-            } else {
-                sLog->outError("sys", "[TrialOfFinality] Group %u: Could not get Announcer AI to start wave %d.", groupId, trialInfo->currentWave);
-                // Fallback or error handling if AI is missing
-            }
-        } else {
-             sLog->outError("sys", "[TrialOfFinality] Group %u: Could not find Announcer (GUID %s) to start wave %d.", groupId, trialInfo->announcerGuid.ToString().c_str(), trialInfo->currentWave);
-             // If announcer is critical, this might mean the trial cannot proceed correctly.
-             // For now, the AI's event will just not fire if the announcer isn't there.
-             // Consider a direct call to SpawnActualWave if announcer is optional for spawning.
-        }
-    }
-    // For later use (e.g. on player death, disconnect, trial end)
-    void RemoveTrial(uint32 groupId) {
-        m_activeTrials.erase(groupId);
-        sLog->outMessage("sys", "[TrialOfFinality] Removed active trial for group ID %u.", groupId);
     }
 
     void OnPlayerLogout(Player* player) override
@@ -701,56 +658,7 @@ public:
         }
     }
 
-    void SetTrialGroupId(uint32 groupId) {
-        m_trialGroupId = groupId;
-        sLog->outDetail("[TrialOfFinality] Announcer AI (GUID %s, Entry %u) linked to group %u.", me->GetGUID().ToString().c_str(), me->GetEntry(), m_trialGroupId);
-    }
-
-    void DoAnnounce(const std::string& text) {
-        if (text.empty()) return;
-        me->Say(text, LANG_UNIVERSAL, nullptr);
-        sLog->outDetail("[TrialOfFinality] Announcer (Group %u): %s", m_trialGroupId, text.c_str());
-    }
-
-    void AnnounceAndSpawnWave(int waveNum, uint32 spawnDelayMs) {
-        if (waveNum <= 0) return;
-        m_waveToAnnounceAndSpawn = waveNum;
-
-        std::string announcement_text = "Wave " + std::to_string(waveNum) + "! Prepare yourselves!";
-
-        if (waveNum == 1) announcement_text = "Let the Trial of Finality commence! Your first challengers approach!";
-        else if (waveNum == 5) announcement_text = "The final wave! Overcome this, and glory is yours!"; // Example: Max 5 waves
-
-        DoAnnounce(announcement_text);
-
-        m_events.ScheduleEvent(1 /*EVENT_SPAWN_WAVE*/, spawnDelayMs);
-        sLog->outDetail("[TrialOfFinality] Announcer (Group %u) scheduled wave %d spawn in %u ms.", m_trialGroupId, waveNum, spawnDelayMs);
-    }
-
-    void UpdateAI(uint32 diff) override {
-        if (!m_trialGroupId && m_events.Empty()) return; // No group or no pending events, do nothing
-
-        m_events.Update(diff);
-        switch (m_events.ExecuteEvent()) {
-            case 1: // EVENT_SPAWN_WAVE
-                if (m_trialGroupId != 0 && m_waveToAnnounceAndSpawn != 0) {
-                    sLog->outDetail("[TrialOfFinality] Announcer (Group %u) UpdateAI: Event 1 triggered for wave %d. Calling TrialManager to spawn.", m_trialGroupId, m_waveToAnnounceAndSpawn);
-                    // This will be implemented in a later sub-step to call:
-                    // ModTrialOfFinality::TrialManager::instance()->SpawnActualWave(m_trialGroupId, m_waveToAnnounceAndSpawn);
-                    DoAnnounce("They are here!"); // Placeholder for spawn happening
-                }
-                m_waveToAnnounceAndSpawn = 0;
-                break;
-        }
-    }
-};
-
-class npc_trial_announcer : public CreatureScript
-{
-public:
-    npc_trial_announcer() : CreatureScript("npc_trial_announcer") {}
-
-    CreatureAI* GetAI(Creature* creature) const override
+    void OnCreatureKill(Player* killer, Creature* killed) override
     {
         if (!ModuleEnabled || !killer || !killed || !killer->GetSession()) { return; }
         Group* group = killer->GetGroup();
@@ -763,25 +671,6 @@ public:
             }
         }
     }
-};
-
-// --- NPC Scripts ---
-enum FateweaverArithosGossipActions
-{
-    GOSSIP_ACTION_TEXT_ONLY_BASE = 9900,
-    GOSSIP_ACTION_TEXT_NO_GROUP = 9901,
-    GOSSIP_ACTION_TEXT_NOT_LEADER = 9902,
-    GOSSIP_ACTION_TEXT_INFO_EXPLAIN_LINE = 9903, // Renamed for clarity
-
-    GOSSIP_ACTION_SHOW_INFO_PAGE = 1,
-    GOSSIP_ACTION_START_TRIAL = 2,
-    GOSSIP_ACTION_GO_BACK_TO_MAIN_MENU = 3
-};
-
-class npc_fateweaver_arithos : public CreatureScript
-{
-public:
-    npc_fateweaver_arithos() : CreatureScript("npc_fateweaver_arithos") { }
 
     void OnPlayerKilledByCreature(Creature* /*killer*/, Player* killed) override
     {
@@ -820,94 +709,6 @@ public:
                 if (resurrector && resurrector->GetSession() && resurrector != player) { ChatHandler(resurrector->GetSession()).PSendSysMessage("%s has been successfully resurrected and rejoins the Trial!", player->GetName().c_str()); }
             }
         }
-        else
-        {
-            AddGossipItemFor(player, GOSSIP_ICON_CHAT, "(You must be in a group to undertake the Trial.)", GOSSIP_SENDER_MAIN, FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_NO_GROUP);
-        }
-
-        SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
-        return true;
-    }
-
-    void ShowInfoPage(Player* player, Creature* creature) {
-        ClearGossipMenuFor(player);
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "The Trial of Finality is a high-stakes challenge for 1 to 5 players.", GOSSIP_SENDER_MAIN, FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_INFO_EXPLAIN_LINE);
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "You will face increasingly difficult waves of enemies.", GOSSIP_SENDER_MAIN, FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_INFO_EXPLAIN_LINE);
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "If you die while holding the Trial Token, your character will be PERMANENTLY RETIRED.", GOSSIP_SENDER_MAIN, FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_INFO_EXPLAIN_LINE);
-        AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Success grants significant gold and the prestigious title 'Conqueror of Finality'.", GOSSIP_SENDER_MAIN, FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_INFO_EXPLAIN_LINE);
-        AddGossipItemFor(player, GOSSIP_ICON_DOT, "[Go back]", GOSSIP_SENDER_MAIN, FateweaverArithosGossipActions::GOSSIP_ACTION_GO_BACK_TO_MAIN_MENU);
-        SendGossipMenuFor(player, player->GetGossipTextId(creature), creature->GetGUID());
-    }
-
-    bool OnGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
-    {
-        if (!ModuleEnabled || FateweaverArithosEntry != creature->GetEntry()) {
-            CloseGossipMenuFor(player);
-            return true;
-        }
-        ClearGossipMenuFor(player);
-
-        if (sender == GOSSIP_SENDER_MAIN) {
-            switch (action) {
-            case FateweaverArithosGossipActions::GOSSIP_ACTION_SHOW_INFO_PAGE:
-                ShowInfoPage(player, creature);
-                break;
-            case FateweaverArithosGossipActions::GOSSIP_ACTION_GO_BACK_TO_MAIN_MENU:
-                OnGossipHello(player, creature);
-                break;
-            case FateweaverArithosGossipActions::GOSSIP_ACTION_START_TRIAL:
-                {
-                    if (TrialManager::ValidateGroupForTrial(player, creature)) {
-                        if (ModTrialOfFinality::TrialManager::instance()->InitiateTrial(player)) {
-                            // Notification sent by InitiateTrial or implied by teleport
-                            sLog->outMessage("sys", "[TrialOfFinality] Group validation and initiation successful for leader %s (GUID %u).", player->GetName().c_str(), player->GetGUID().GetCounter());
-                        } else {
-                            // InitiateTrial failed, message should have been sent by it.
-                            sLog->outError("sys", "[TrialOfFinality] Trial initiation failed for leader %s after successful validation.", player->GetName().c_str(), player->GetGUID().ToString().c_str());
-                        }
-                    }
-                    // If validation fails, ValidateGroupForTrial already sent the message.
-                    CloseGossipMenuFor(player); // Always close after this attempt.
-                }
-                break;
-            case FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_NO_GROUP:
-            case FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_NOT_LEADER:
-                OnGossipHello(player, creature);
-                break;
-            case FateweaverArithosGossipActions::GOSSIP_ACTION_TEXT_INFO_EXPLAIN_LINE:
-                ShowInfoPage(player, creature);
-                break;
-            default:
-                CloseGossipMenuFor(player);
-                break;
-            }
-        }
-        return true;
-    }
-};
-
-// The new npc_trial_announcer and its AI are defined above.
-// The old placeholder version of npc_trial_announcer is now removed by replacing it with nothing.
-
-// --- Player and World Event Scripts ---
-class ModPlayerScript : public PlayerScript
-{
-public:
-    ModPlayerScript() : PlayerScript("ModTrialOfFinalityPlayerScript") {}
-
-    void OnLogin(Player* player) override {
-        if (!ModuleEnabled) return;
-        // TODO: Implement actual disablement check based on DisableCharacterMethod
-        // For now, this is a placeholder:
-        if (DisableCharacterMethod == "custom_flag" && player->HasAura(99999)) { // Assuming 99999 is a placeholder aura for "disabled"
-             player->GetSession()->SendNotification("This character is permanently disabled due to the Trial of Finality.");
-             player->LogoutPlayer(true);
-        }
-    }
-
-    void OnPlayerKilledByCreature(Creature* killer, Player* killed) override {
-        if (!ModuleEnabled) return;
-        // TODO: Integrate with TrialManager
     }
 };
 
