@@ -1,49 +1,29 @@
-name: Build AzerothCore Fork + Playerbots + mod_trial_of_finality
+# Define the module name
+set(MODULE_NAME mod_trial_of_finality)
 
-on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
+# Specify the source files
+set(MODULE_SOURCES
+    src/YourSourceFile.cpp
+    # Add other source files as needed
+)
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
+# Include directories
+include_directories(
+    ${CMAKE_SOURCE_DIR}/src
+    ${CMAKE_SOURCE_DIR}/modules
+    # Add other directories as needed
+)
 
-    steps:
-      - name: Checkout your mod into mod-src
-        uses: actions/checkout@v3
-        with:
-          path: mod-src
+# Define the module as a shared library
+add_library(${MODULE_NAME} MODULE ${MODULE_SOURCES})
 
-      - name: Install dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client
+# Link against necessary libraries
+target_link_libraries(${MODULE_NAME}
+    AzerothCore
+    # Add other libraries as needed
+)
 
-      - name: Clone your AzerothCore fork (Playerbot branch)
-        run: |
-          git clone --branch=Playerbot --depth=1 https://github.com/liyunfan1223/azerothcore-wotlk.git azerothcore
-          mkdir -p azerothcore/modules
-
-      - name: Clone mod-playerbots (if not included in fork)
-        run: |
-          if [ ! -d "azerothcore/modules/mod-playerbots" ]; then
-            git clone --depth=1 https://github.com/azerothcore/mod-playerbots.git azerothcore/modules/mod-playerbots
-          fi
-
-      - name: Copy your mod into AzerothCore modules
-        run: |
-          mkdir -p azerothcore/modules/mod_trial_of_finality
-          cp -r mod-src/* azerothcore/modules/mod_trial_of_finality
-
-      - name: Build AzerothCore + mods
-        run: |
-          cd azerothcore
-          mkdir build && cd build
-          cmake ../ -DCMAKE_INSTALL_PREFIX=../bin
-          make -j$(nproc)
-
-      - name: Confirm worldserver built
-        run: |
-          test -f azerothcore/bin/bin/worldserver && echo "✅ Build succeeded." || (echo "❌ Build failed!" && exit 1)
+# Set the output directory for the module
+set_target_properties(${MODULE_NAME} PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/modules/${MODULE_NAME}/
+)
