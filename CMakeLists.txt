@@ -1,11 +1,11 @@
 cmake_minimum_required(VERSION 3.5)
 
 # Define the module name
-set(MODULE_NAME "mod_trial_of_finality")
+set(MODULE_NAME "mod-trial-of-finality")
 
 # Define the source files
 set(MODULE_SOURCES
-    src/mod_trial_of_finality.cpp
+    src/mod-trial-of-finality.cpp
 )
 
 # Include AzerothCore directories
