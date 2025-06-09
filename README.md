@@ -1,3 +1,5 @@
+WORK IN PROGRESS!!!!
+
 # AzerothCore Module: Trial of Finality (`mod_trial_of_finality`)
 
 ## 1. Overview
