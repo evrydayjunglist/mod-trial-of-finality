@@ -23,6 +23,7 @@ Before testing, ensure you have the following:
     *   `trial_of_finality_log` (for event logging)
     *   `character_trial_finality_status` (stores the `is_perma_failed` flag and timestamp)
     *   `character_aura` (to verify `AURA_ID_TRIAL_PERMADEATH` (currently 40000) is cleaned up if it was applied).
+*   **Configuration Awareness:** Be aware of the `TrialOfFinality.PermaDeath.ExemptGMs` setting in `mod_trial_of_finality.conf`. For GMs to test the full perma-death loop on their own characters (including login kick), this option might need to be temporarily set to `false`.
 
 ## 3. Testing Areas
 
@@ -86,16 +87,23 @@ Before testing, ensure you have the following:
     *   If the wave ends after resurrection, ensure they are NOT perma-deathed.
 *   **C.4. No Resurrection / Perma-Death Application:**
     *   Player dies and is *not* resurrected before the current wave ends.
-    *   Verify `is_perma_failed` is set to `1` and `last_failed_timestamp` is updated in the `character_trial_finality_status` table for the player's GUID.
+    *   Verify `is_perma_failed` is set to `1` and `last_failed_timestamp` is updated in the `character_trial_finality_status` table for the player's GUID (unless they are an exempt GM).
     *   Verify their GUID is added to `permanentlyFailedPlayerGuids` (internal tracking for current trial).
     *   Verify `AURA_ID_TRIAL_PERMADEATH` (currently 40000) is ideally *not* applied, or if it is for an immediate effect, that it's cleaned up upon setting the DB flag or by the GM reset command. The DB flag is the source of truth.
-*   **C.5. Login Kick:**
-    *   After a character has `is_perma_failed = 1` in the database, log out and attempt to log back in with that character.
+*   **C.5. GM Exemption for Perma-Death:**
+    *   Set `TrialOfFinality.PermaDeath.ExemptGMs = true` in the configuration.
+    *   Have a GM character (account with `SEC_GAMEMASTER` or higher) fail the trial under conditions that would normally cause perma-death.
+    *   **Expected:** The GM character should *not* have `is_perma_failed = 1` in `character_trial_finality_status`. A log message should indicate the exemption. The GM should not be kicked on next login.
+    *   Set `TrialOfFinality.PermaDeath.ExemptGMs = false` in the configuration.
+    *   Have a GM character fail the trial similarly.
+    *   **Expected:** The GM character *should* have `is_perma_failed = 1` in `character_trial_finality_status`. The GM character *will* be kicked on the next login (unless `.trial reset` is used before relogging).
+*   **C.6. Login Kick (Non-GM or GM with Exemption Disabled):**
+    *   After a character (non-GM, or GM with exemption disabled) has `is_perma_failed = 1` in the database, log out and attempt to log back in with that character.
     *   Verify they are kicked from the game with the message "Your fate was sealed in the Trial of Finality."
-*   **C.6. Group Wipe:**
+*   **C.7. Group Wipe:**
     *   Simulate a scenario where all active players die in a wave.
     *   Verify the trial ends in failure.
-    *   Verify all players who were "downed" at that point are perma-deathed.
+    *   Verify all players who were "downed" at that point are perma-deathed (DB flag set), considering GM exemption status.
 
 ### D. Arena Boundary Enforcement
 
