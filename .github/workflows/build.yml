@@ -11,38 +11,45 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # Checkout your mod repo into a subfolder to avoid copy conflicts
+      # Checkout your mod repo into a subfolder
       - name: Checkout mod_trial_of_finality
         uses: actions/checkout@v3
         with:
           path: mod-src
 
-      # Install system dependencies for building AzerothCore
+      # Install dependencies, including Boost
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client \
-          libboost-all-dev
-      # Clone your AzerothCore fork on the Playerbot branch
+            libboost-all-dev
+
+      # Clone AzerothCore (Playerbot branch)
       - name: Clone AzerothCore (Playerbot branch)
         run: |
           git clone --branch=Playerbot --depth=1 https://github.com/liyunfan1223/azerothcore-wotlk.git azerothcore
           mkdir -p azerothcore/modules
 
-      # Clone mod-playerbots if not already included in your fork
+      # Clone mod-playerbots if needed
       - name: Clone mod-playerbots (if needed)
         run: |
           if [ ! -d "azerothcore/modules/mod-playerbots" ]; then
             git clone --depth=1 https://github.com/azerothcore/mod-playerbots.git azerothcore/modules/mod-playerbots
           fi
 
-      # Copy your mod into the AzerothCore modules directory
+      # Copy your module into AzerothCore
       - name: Copy mod_trial_of_finality into AzerothCore
         run: |
           mkdir -p azerothcore/modules/mod_trial_of_finality
           cp -r mod-src/* azerothcore/modules/mod_trial_of_finality
 
-      # Build AzerothCore and your module
+      # 🩹 Hack: Create dummy revision.h to prevent CMake error from mod-playerbots
+      - name: Workaround for mod-playerbots revision.h configure_file error
+        run: |
+          mkdir -p azerothcore/src/shared
+          echo "// dummy revision header" > azerothcore/src/shared/revision.h
+
+      # Build AzerothCore + your mod
       - name: Build AzerothCore + modules
         run: |
           cd azerothcore
@@ -50,7 +57,7 @@ jobs:
           cmake ../ -DCMAKE_INSTALL_PREFIX=../bin
           make -j$(nproc)
 
-      # Verify that the build succeeded by checking for the worldserver binary
+      # Confirm build success
       - name: Confirm worldserver built
         run: |
           test -f azerothcore/bin/bin/worldserver && echo "✅ Build succeeded." || (echo "❌ Build failed!" && exit 1)
