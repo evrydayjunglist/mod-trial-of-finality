@@ -1,0 +1,48 @@
+name: Build AzerothCore Fork + Playerbots + mod_trial_of_finality
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout your mod into mod-src
+        uses: actions/checkout@v3
+        with:
+          path: mod-src
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client
+
+      - name: Clone your AzerothCore fork (Playerbot branch)
+        run: |
+          git clone --branch=Playerbot --depth=1 https://github.com/liyunfan1223/azerothcore-wotlk.git azerothcore
+          mkdir -p azerothcore/modules
+
+      - name: Clone mod-playerbots (if not included in fork)
+        run: |
+          if [ ! -d "azerothcore/modules/mod-playerbots" ]; then
+            git clone --depth=1 https://github.com/azerothcore/mod-playerbots.git azerothcore/modules/mod-playerbots
+          fi
+
+      - name: Copy your mod into AzerothCore modules
+        run: |
+          cp -r mod-src azerothcore/modules/mod_trial_of_finality
+
+      - name: Build AzerothCore + mods
+        run: |
+          cd azerothcore
+          mkdir build && cd build
+          cmake ../ -DCMAKE_INSTALL_PREFIX=../bin
+          make -j$(nproc)
+
+      - name: Confirm worldserver built
+        run: |
+          test -f azerothcore/bin/bin/worldserver && echo "✅ Build succeeded." || (echo "❌ Build failed!" && exit 1)
