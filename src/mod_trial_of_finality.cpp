@@ -27,16 +27,14 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
-#include <string> // For std::stoul in OnConfigLoad for 15b
+#include <string>
 
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "DBCStores.h"
 #include "CharTitles.h"
 #include "DatabaseEnv.h"
-#include "ObjectGuid.h" // Added for NPC caching
-#include "GridNotifiers.h" // For CreatureListSearcher in 15b
-
+#include "ObjectGuid.h"
 
 // Module specific namespace
 namespace ModTrialOfFinality
@@ -163,7 +161,7 @@ uint32 CheeringNpcsCheerIntervalMs = 2000; // Interval for the second cheer
 bool PermaDeathExemptGMs = true; // Exempt GMs from perma-death
 
 // --- Main Trial Logic ---
-struct ActiveTrialInfo { /* ... as of Step 11d ... */
+struct ActiveTrialInfo {
     uint32 groupId;
     ObjectGuid leaderGuid;
     std::set<ObjectGuid> memberGuids;
@@ -208,7 +206,7 @@ public:
     void CleanupTrial(uint32 groupId, bool success);
     bool StartTestTrial(Player* gmPlayer);
     void CheckPlayerLocationsAndEnforceBoundaries(uint32 groupId);
-    void TriggerCityNpcCheers(uint32 successfulGroupId); // New for 15b
+    void TriggerCityNpcCheers(uint32 successfulGroupId);
 
     ActiveTrialInfo* GetActiveTrialInfo(uint32 groupId) {
         auto it = m_activeTrials.find(groupId);
@@ -224,7 +222,7 @@ private:
     std::map<uint32, ActiveTrialInfo> m_activeTrials;
 };
 
-bool TrialManager::InitiateTrial(Player* leader) { /* ... as of Step 12 ... */
+bool TrialManager::InitiateTrial(Player* leader) {
     if (!leader || !leader->GetSession()) return false;
     Group* group = leader->GetGroup();
     if (!group) return false;
@@ -288,11 +286,11 @@ bool TrialManager::InitiateTrial(Player* leader) { /* ... as of Step 12 ... */
     return true;
 }
 
-void TrialManager::CheckPlayerLocationsAndEnforceBoundaries(uint32 groupId) { /* ... (as of Step 11d) ... */ }
+void TrialManager::CheckPlayerLocationsAndEnforceBoundaries(uint32 groupId) { }
 
-void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32 delayMs) { /* ... (as of Step 11d, with CheckPlayerLocations call) ... */ }
+void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32 delayMs) { }
 
-void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId) { /* ... (as of Step 8c) ... */ }
+void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId) { }
 
 void TrialManager::SpawnActualWave(uint32 groupId) {
     ActiveTrialInfo* currentTrial = GetActiveTrialInfo(groupId);
@@ -394,7 +392,7 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
     }
 }
 
-void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) { /* ... (as of Step 8a) ... */ }
+void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) { }
 
 void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason) {
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
@@ -568,7 +566,6 @@ void TrialManager::TriggerCityNpcCheers(uint32 /*successfulGroupId*/) {
                     alreadyCheeringNpcs.insert(npcGuid);
                     cheeredThisCluster++;
                     totalCheeredThisEvent++;
-                    // sLog->outDebug("[TrialOfFinality] NPC %s (GUID %u) cheered for player %s.", creature->GetName().c_str(), npcGuid.GetCounter(), player->GetName().c_str());
                 }
             }
         }
@@ -631,7 +628,7 @@ class ModServerScript : public ServerScript
 public:
     ModServerScript() : ServerScript("ModTrialOfFinalityServerScript") {}
 
-    static std::map<uint32, std::vector<ObjectGuid>> s_cheeringNpcCacheByZone; // Keep this one
+    static std::map<uint32, std::vector<ObjectGuid>> s_cheeringNpcCacheByZone;
     void OnConfigLoad(bool reload) override
     {
         sLog->outMessage("sys", "Loading Trial of Finality module configuration...");
@@ -800,7 +797,8 @@ public:
         NpcPoolMedium.clear();
         NpcPoolHard.clear();
 
-        std::string easyPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Easy", "70001,70002,70003,70004,70005"); // Default reduced for brevity
+        // Default strings here are fallbacks if .conf key is missing, actual defaults user sees are in .conf file.
+        std::string easyPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Easy", "70001,70002,70003,70004,70005");
         std::string mediumPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Medium", "70011,70012,70013,70014,70015");
         std::string hardPoolStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcPools.Hard", "70021,70022,70023,70024,70025");
 
