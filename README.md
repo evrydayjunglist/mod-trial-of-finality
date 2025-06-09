@@ -21,6 +21,7 @@
 *   GM debug commands for resetting player status and testing the trial.
 *   Fully configurable via `mod_trial_of_finality.conf`.
 *   Designed to be compatible with `mod-playerbots` (bots are excluded from participating).
+*   **Dynamic NPC Cheering (Cached):** Upon successful trial completion, NPCs in configured major cities can perform cheers for the victorious players. This system uses a server-startup cache of eligible NPCs to ensure minimal performance impact. The system is designed to make NPCs cheer twice, though the second cheer's delayed execution is currently logged pending further implementation of core timer functionalities.
 
 ## 3. Installation
 
@@ -57,6 +58,21 @@ Key configuration options (see the `.conf` file for default values and comments)
 *   `TrialOfFinality.NpcScaling.Mode`: (Currently "match_highest_level", future expansion possible).
 *   `TrialOfFinality.DisableCharacter.Method`: (Currently "custom_flag" via Aura ID `40000`. Future DB flag possible).
 *   `TrialOfFinality.GMDebug.Enable`: (Not currently used to gate GM commands, they are available if module is enabled).
+*   `TrialOfFinality.AnnounceWinners.World.Enable`: (true/false) Enables or disables world announcements upon successful trial completion. Default: `true`.
+*   `TrialOfFinality.AnnounceWinners.World.MessageFormat`: String format for the world announcement. Placeholders: `{group_leader}`, `{player_list}`.
+
+### NPC Cheering Settings
+
+These settings control the behavior of NPCs cheering in cities when a trial is successfully completed. This feature uses a cached list of NPCs generated at server startup.
+
+*   `TrialOfFinality.CheeringNpcs.Enable`: (true/false) Enables or disables the NPC cheering feature. Default: `true`.
+*   `TrialOfFinality.CheeringNpcs.CityZoneIDs`: Comma-separated string of Zone IDs where NPCs are eligible to cheer. Example: `"1519,1537"` for Stormwind and Orgrimmar. Default: (common city zones as per conf file).
+*   `TrialOfFinality.CheeringNpcs.RadiusAroundPlayer`: Float value defining the radius (in yards) around a player (who was part of the winning group and is in a cheering zone) within which cached NPCs will be selected to cheer. Default: `40.0`.
+*   `TrialOfFinality.CheeringNpcs.MaxNpcsToCheerPerPlayerCluster`: Integer defining the maximum number of NPCs that will cheer around a single player or a close cluster of players. Default: `5`.
+*   `TrialOfFinality.CheeringNpcs.MaxTotalNpcsToCheerWorld`: Integer defining the overall maximum number of NPCs that will cheer across the entire world for a single trial success event. Default: `50`.
+*   `TrialOfFinality.CheeringNpcs.TargetNpcFlags`: Uint32 value. NPCs must have at least one of these flags to be considered for cheering. Set to `0` (UNIT_NPC_FLAG_NONE) to target NPCs regardless of their specific flags (unless excluded). Refer to core documentation for NPC flag values. Default: `0`.
+*   `TrialOfFinality.CheeringNpcs.ExcludeNpcFlags`: Uint32 value. NPCs with any of these flags will be excluded from cheering, even if they match `TargetNpcFlags`. This is useful for preventing guards, vendors, trainers, etc., from cheering. Default: (flags for common utility NPCs, see conf file).
+*   `TrialOfFinality.CheeringNpcs.CheerIntervalMs`: Uint32 value. The intended interval in milliseconds for a second cheer from the same NPC. A value of `0` disables the second cheer. *Note: Currently, the execution of this second cheer is logged, and its full implementation depends on future enhancements to timer mechanisms.* Default: `2000`.
 
 Placeholder Aura ID for Perma-Death: `AURA_ID_TRIAL_PERMADEATH = 40000`. Ensure this aura ID is a passive, persistent aura in your DBCs, or change it to one that is.
 
@@ -139,5 +155,5 @@ Access to commands requires `SEC_GAMEMASTER` level.
 *   Creature entries for waves (`70001`-`70030`) are placeholders. Update these in `src/mod_trial_of_finality.cpp` or create these custom NPCs.
 *   Wave difficulty scaling currently adjusts NPC count and provides a basic health multiplier for later waves. More complex stat scaling or varied NPC abilities per wave could be added.
 *   Consider randomizing NPC types for waves from predefined lists to enhance replayability.
-*   World announcements for trial winners could be a future addition.
+*   World announcements for trial winners have been added (see configuration options).
 ```
