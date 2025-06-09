@@ -15,12 +15,14 @@
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include "Log.h" // Added for logging
+#include "ChatCommand.h" // For CommandScript
 
 #include <time.h> // For time_t
 #include <set> // For std::set
 #include <sstream> // For std::ostringstream
 #include <map> // For std::map
 #include <cmath> // For round
+#include <vector> // for std::vector (used in CommandScript)
 
 #include "ObjectAccessor.h" // For FindPlayer
 #include "Player.h" // For Player class (if not already via other headers)
@@ -46,10 +48,7 @@ enum TrialEventType {
     TRIAL_EVENT_GM_COMMAND_RESET,
     TRIAL_EVENT_GM_COMMAND_TEST_START,
     TRIAL_EVENT_PLAYER_RESURRECTED,
-    TRIAL_EVENT_PERMADEATH_APPLIED,
-    TRIAL_EVENT_PLAYER_DISCONNECT,
-    TRIAL_EVENT_PLAYER_RECONNECT,
-    TRIAL_EVENT_STRAY_TOKEN_REMOVED
+    TRIAL_EVENT_PERMADEATH_APPLIED
 };
 
 void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* player = nullptr,
@@ -65,9 +64,6 @@ void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* playe
         case TRIAL_EVENT_GM_COMMAND_TEST_START: eventTypeStr = "GM_COMMAND_TEST_START"; break;
         case TRIAL_EVENT_PLAYER_RESURRECTED: eventTypeStr = "PLAYER_RESURRECTED"; break;
         case TRIAL_EVENT_PERMADEATH_APPLIED: eventTypeStr = "PERMADEATH_APPLIED"; break;
-        case TRIAL_EVENT_PLAYER_DISCONNECT: eventTypeStr = "PLAYER_DISCONNECT"; break;
-        case TRIAL_EVENT_PLAYER_RECONNECT: eventTypeStr = "PLAYER_RECONNECT"; break;
-        case TRIAL_EVENT_STRAY_TOKEN_REMOVED: eventTypeStr = "STRAY_TOKEN_REMOVED"; break;
     }
 
     ObjectGuid playerGuid = player ? player->GetGUID() : ObjectGuid::Empty;
@@ -184,6 +180,8 @@ public:
     void FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason);
     void HandleTrialFailure(uint32 groupId, const std::string& reason);
     void CleanupTrial(uint32 groupId, bool success);
+    bool StartTestTrial(Player* gmPlayer);
+
     ActiveTrialInfo* GetActiveTrialInfo(uint32 groupId) {
         auto it = m_activeTrials.find(groupId);
         if (it != m_activeTrials.end()) { return &it->second; }
@@ -198,7 +196,7 @@ private:
     std::map<uint32, ActiveTrialInfo> m_activeTrials;
 };
 
-bool TrialManager::InitiateTrial(Player* leader) {
+bool TrialManager::InitiateTrial(Player* leader) { /* ... content from previous correct state ... */
     if (!leader || !leader->GetSession()) return false;
     Group* group = leader->GetGroup();
     if (!group) return false;
@@ -262,7 +260,7 @@ bool TrialManager::InitiateTrial(Player* leader) {
     return true;
 }
 
-void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32 delayMs) {
+void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32 delayMs) { /* ... content from previous correct state ... */
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
     if (!trialInfo) { sLog->outError("sys", "[TrialOfFinality] PrepareAndAnnounceWave: Could not find active trial for group %u", groupId); return; }
     trialInfo->currentWave = waveNumber;
@@ -277,7 +275,7 @@ void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32
     } else { sLog->outError("sys", "[TrialOfFinality] Group %u: Could not find Announcer (GUID %s) for wave %d.", groupId, trialInfo->announcerGuid.ToString().c_str(), trialInfo->currentWave); CleanupTrial(groupId, false); }
 }
 
-void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId) {
+void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId) { /* ... content from previous correct state ... */
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
     if (!trialInfo) { sLog->outWarning("sys", "[TrialOfFinality] HandleMonsterKilledInTrial: No active trial for group %u (monster %s).", groupId, monsterGuid.ToString().c_str()); return; }
     if (!trialInfo->activeMonsters.count(monsterGuid)) { sLog->outWarning("sys", "[TrialOfFinality] HandleMonsterKilledInTrial: Monster %s (Group %u) not in active set for wave %d.", monsterGuid.ToString().c_str(), groupId, trialInfo->currentWave); return; }
@@ -329,7 +327,6 @@ void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 gro
         uint32 maxWaves = 5;
         if (justClearedWave >= maxWaves) {
             sLog->outMessage("sys", "[TrialOfFinality] Group %u has cleared all %u waves with active members remaining!", groupId, maxWaves);
-            // Reward distribution happens here for successful completion of all waves
             Map* trialMap = sMapMgr->FindMap(ArenaMapID, 0);
             if (trialMap) {
                 for(ObjectGuid memberGuid : trialInfo->memberGuids) {
@@ -355,7 +352,7 @@ void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 gro
     }
 }
 
-void TrialManager::SpawnActualWave(uint32 groupId) {
+void TrialManager::SpawnActualWave(uint32 groupId) { /* ... content from previous correct state ... */
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
     if (!trialInfo || trialInfo->currentWave == 0 || trialInfo->currentWave > 5) {
         sLog->outError("sys", "[TrialOfFinality] SpawnActualWave: Invalid trial state for group %u, wave %d.", groupId, trialInfo ? trialInfo->currentWave : -1); return;
@@ -401,7 +398,7 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
     } else { sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Successfully attempted to spawn %d creatures, %lu are active.", groupId, trialInfo->currentWave, numNpcsToSpawn, trialInfo->activeMonsters.size()); }
 }
 
-void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) {
+void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) { /* ... content from previous correct state ... */
     if (!downedPlayer || !downedPlayer->GetSession()) return;
     Group* group = downedPlayer->GetGroup();
     if (!group) return;
@@ -426,7 +423,7 @@ void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) {
     else { sLog->outDetail("[TrialOfFinality] Group %u: Player %s downed. Other combatants may still be active.", group->GetId(), downedPlayer->GetName().c_str()); }
 }
 
-void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason) {
+void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason) { /* ... content from previous correct state ... */
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
     if (!trialInfo) { sLog->outWarning("sys", "[TrialOfFinality] FinalizeTrialOutcome called for group %u but no ActiveTrialInfo found. Reason: %s. Trial might have been already cleaned up.", groupId, reason.c_str()); m_activeTrials.erase(groupId); return; }
     sLog->outMessage("sys", "[TrialOfFinality] Finalizing trial for group %u. Overall Success: %s. Reason: %s.", groupId, (overallSuccess ? "Yes" : "No"), reason.c_str());
@@ -458,7 +455,7 @@ void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, con
     CleanupTrial(groupId, overallSuccess);
 }
 
-void TrialManager::HandleTrialFailure(uint32 groupId, const std::string& reason) {
+void TrialManager::HandleTrialFailure(uint32 groupId, const std::string& reason) { /* ... content from previous correct state ... */
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
     if (!trialInfo) { sLog->outWarning("sys", "[TrialOfFinality] HandleTrialFailure called for group %u but no active trial found.", groupId); return; }
     sLog->outMessage("sys", "[TrialOfFinality] Trial FAILED for group %u. Reason: %s. Triggering Finalization.", groupId, reason.c_str());
@@ -540,120 +537,17 @@ public:
     void OnLogin(Player* player) override
     {
         if (!ModuleEnabled || !player || !player->GetSession()) return;
-
-        // 1. Handle Perma-deathed players (kick them)
         if (player->HasAura(AURA_ID_TRIAL_PERMADEATH)) {
-            sLog->outMessage("sys", "[TrialOfFinality] Player %s (GUID %s, Account %u) attempted to login with Permadeath Aura. Preventing login.",
-                player->GetName().c_str(), player->GetGUID().ToString().c_str(), player->GetSession()->GetAccountId());
+            sLog->outMessage("sys", "[TrialOfFinality] Player %s (GUID %s, Account %u) attempted to login with Permadeath Aura %u. Preventing login.", player->GetName().c_str(), player->GetGUID().ToString().c_str(), player->GetSession()->GetAccountId(), AURA_ID_TRIAL_PERMADEATH);
             player->GetSession()->SendNotification("This character succumbed to the Trial of Finality and can no longer enter the world.");
             player->GetSession()->KickPlayer();
-            return;
         }
-
-        // 2. Handle players rejoining an active trial or dealing with stray tokens
-        bool inActiveTrialAndEligible = false;
-        ActiveTrialInfo* trialInfoForRejoin = nullptr;
-
-        Group* group = player->GetGroup();
-        if (group) {
-            trialInfoForRejoin = TrialManager::instance()->GetActiveTrialInfo(group->GetId());
-            if (trialInfoForRejoin &&
-                trialInfoForRejoin->memberGuids.count(player->GetGUID()) &&
-                !trialInfoForRejoin->permanentlyFailedPlayerGuids.count(player->GetGUID())) {
-                inActiveTrialAndEligible = true;
-            }
-        }
-
-        if (inActiveTrialAndEligible && trialInfoForRejoin) {
-            sLog->outMessage("sys", "[TrialOfFinality] Player %s rejoining active trial for group %u (Wave %d).",
-                player->GetName().c_str(), group->GetId(), trialInfoForRejoin->currentWave);
-            LogTrialDbEvent(TRIAL_EVENT_PLAYER_RECONNECT,
-                            group->GetId(), player, trialInfoForRejoin->currentWave, trialInfoForRejoin->highestLevelAtStart,
-                            "Player reconnected to active trial.");
-
-            if (player->GetMapId() != ArenaMapID || !player->IsWithinDist3d(ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, 200.0f)) {
-                player->TeleportTo(ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO);
-                sLog->outDetail("[TrialOfFinality] Teleported rejoining player %s to arena.", player->GetName().c_str());
-            }
-
-            if (!player->HasItemCount(TrialTokenEntry, 1, false)) {
-                if (Item* trialToken = player->AddItem(TrialTokenEntry, 1)) {
-                     player->SendNewItem(trialToken, 1, true, false);
-                     sLog->outWarning("sys", "[TrialOfFinality] Re-granted Trial Token to rejoining player %s.", player->GetName().c_str());
-                } else {
-                     sLog->outError("sys", "[TrialOfFinality] Failed to re-grant Trial Token to rejoining player %s!", player->GetName().c_str());
-                }
-            }
-
-            if (!player->IsDisableXpGain()) {
-                player->SetDisableXpGain(true, true);
-                sLog->outDetail("[TrialOfFinality] XP gain re-disabled for rejoining player %s.", player->GetName().c_str());
-            }
-        } else if (player->HasItemCount(TrialTokenEntry, 1, false)) {
-            sLog->outWarning("sys", "[TrialOfFinality] Player %s logged in with a stray Trial Token. Removing it.", player->GetName().c_str());
-            player->DestroyItemCount(TrialTokenEntry, 1, true);
-            LogTrialDbEvent(TRIAL_EVENT_STRAY_TOKEN_REMOVED,
-                            0, player, 0, 0, "Stray token removed on login.");
-        }
-    }
-
-    void OnPlayerLogout(Player* player) override
-    {
-        if (!ModuleEnabled || !player) {
-            return;
-        }
-
-        Group* group = player->GetGroup();
-        if (!group) {
-            return;
-        }
-
-        ActiveTrialInfo* trialInfo = TrialManager::instance()->GetActiveTrialInfo(group->GetId());
-        if (trialInfo) {
-            if (trialInfo->memberGuids.count(player->GetGUID()) &&
-                !trialInfo->permanentlyFailedPlayerGuids.count(player->GetGUID())) {
-
-                sLog->outMessage("sys", "[TrialOfFinality] Player %s (GUID %s, Group %u) LOGGED OUT during active trial (Wave %d).",
-                    player->GetName().c_str(), player->GetGUID().ToString().c_str(), group->GetId(), trialInfo->currentWave);
-
-                if (!trialInfo->downedPlayerGuids.count(player->GetGUID())) {
-                    trialInfo->downedPlayerGuids[player->GetGUID()] = time(nullptr);
-                    LogTrialDbEvent(TRIAL_EVENT_PLAYER_DISCONNECT,
-                                    group->GetId(), player, trialInfo->currentWave, trialInfo->highestLevelAtStart,
-                                    "Player disconnected during wave.");
-                }
-
-                uint32 potentialCombatants = 0;
-                for (const auto& guid : trialInfo->memberGuids) {
-                    if (!trialInfo->permanentlyFailedPlayerGuids.count(guid)) {
-                        potentialCombatants++;
-                    }
-                }
-
-                bool allEffectivelyDownOrOffline = false;
-                if (potentialCombatants > 0) {
-                    uint32 currentlyDownOrActuallyOffline = 0;
-                    for (const auto& guid : trialInfo->memberGuids) {
-                        if (trialInfo->permanentlyFailedPlayerGuids.count(guid)) continue;
-
-                        if (trialInfo->downedPlayerGuids.count(guid)) {
-                            currentlyDownOrActuallyOffline++;
-                        } else {
-                            Player* member = ObjectAccessor::FindPlayer(guid);
-                            if (!member || !member->GetSession()) {
-                                currentlyDownOrActuallyOffline++;
-                            }
-                        }
-                    }
-                    if (currentlyDownOrActuallyOffline >= potentialCombatants) {
-                        allEffectivelyDownOrOffline = true;
-                    }
-                }
-
-                if (allEffectivelyDownOrOffline) {
-                    sLog->outMessage("sys", "[TrialOfFinality] Group %u: GROUP WIPE detected due to disconnect. All active members downed or offline.", group->GetId());
-                    TrialManager::instance()->FinalizeTrialOutcome(group->GetId(), false /*success*/, "Group wipe due to player disconnect.");
-                }
+        if (player->HasItemCount(TrialTokenEntry, 1, false)) {
+            Group* group = player->GetGroup();
+            bool inActiveTrial = group && TrialManager::instance()->GetActiveTrialInfo(group->GetId()) != nullptr;
+            if (!inActiveTrial) {
+                sLog->outWarning("sys", "[TrialOfFinality] Player %s logged in with Trial Token but not in an active trial. Removing token.", player->GetName().c_str());
+                player->DestroyItemCount(TrialTokenEntry, 1, true);
             }
         }
     }
@@ -691,6 +585,40 @@ public:
         }
     }
 
+    void OnPlayerLogout(Player* player) override
+    {
+        if (!ModuleEnabled || !player) { return; }
+        Group* group = player->GetGroup();
+        if (!group) { return; }
+        ActiveTrialInfo* trialInfo = TrialManager::instance()->GetActiveTrialInfo(group->GetId());
+        if (trialInfo) {
+            if (trialInfo->memberGuids.count(player->GetGUID()) &&
+                !trialInfo->permanentlyFailedPlayerGuids.count(player->GetGUID())) {
+                sLog->outMessage("sys", "[TrialOfFinality] Player %s (GUID %s, Group %u) LOGGED OUT during active trial (Wave %d).", player->GetName().c_str(), player->GetGUID().ToString().c_str(), group->GetId(), trialInfo->currentWave);
+                if (!trialInfo->downedPlayerGuids.count(player->GetGUID())) {
+                    trialInfo->downedPlayerGuids[player->GetGUID()] = time(nullptr);
+                    LogTrialDbEvent(TRIAL_EVENT_PLAYER_DISCONNECT, group->GetId(), player, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player disconnected during wave.");
+                }
+                uint32 potentialCombatants = 0;
+                for (const auto& guid : trialInfo->memberGuids) { if (!trialInfo->permanentlyFailedPlayerGuids.count(guid)) { potentialCombatants++; } }
+                bool allEffectivelyDownOrOffline = false;
+                if (potentialCombatants > 0) {
+                    uint32 currentlyDownOrActuallyOffline = 0;
+                    for (const auto& guid : trialInfo->memberGuids) {
+                        if (trialInfo->permanentlyFailedPlayerGuids.count(guid)) continue;
+                        if (trialInfo->downedPlayerGuids.count(guid)) { currentlyDownOrActuallyOffline++; }
+                        else { Player* member = ObjectAccessor::FindPlayer(guid); if (!member || !member->GetSession()) { currentlyDownOrActuallyOffline++; } }
+                    }
+                    if (currentlyDownOrActuallyOffline >= potentialCombatants) { allEffectivelyDownOrOffline = true; }
+                }
+                if (allEffectivelyDownOrOffline) {
+                    sLog->outMessage("sys", "[TrialOfFinality] Group %u: GROUP WIPE detected due to disconnect. All active members downed or offline.", group->GetId());
+                    TrialManager::instance()->FinalizeTrialOutcome(group->GetId(), false, "Group wipe due to player disconnect.");
+                }
+            }
+        }
+    }
+
     void OnPlayerResurrect(Player* player, Player* resurrector) override
     {
         if (!ModuleEnabled || !player || !player->GetSession()) { return; }
@@ -712,7 +640,7 @@ public:
     }
 };
 
-class ModServerScript : public ServerScript { /* ... */ }; // Contents of ModServerScript, Addmod_trial_of_finality_Scripts, Addmod_trial_of_finality are unchanged from previous correct state
+class ModServerScript : public ServerScript { /* ... */ };
 }
 
 void Addmod_trial_of_finality_Scripts() { /* ... */ }
