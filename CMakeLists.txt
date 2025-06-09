@@ -1,0 +1,1 @@
+add_ac_module(mod_trial_of_finality)
