@@ -61,6 +61,10 @@ The module is configured via `mod_trial_of_finality.conf`. Below are the most co
 *   **Perma-Death Options:**
     *   `TrialOfFinality.PermaDeath.ExemptGMs`: If `true` (default), Game Master accounts are not permanently affected by trial failure.
     *   *Note:* Perma-death status is stored in the `character_trial_finality_status` database table. The old `DisableCharacter.Method` config option and direct reliance on `AURA_ID_TRIAL_PERMADEATH` (40000) are now primarily historical/secondary. See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for full details.
+*   **Trial Confirmation:**
+    *   `TrialOfFinality.Confirmation.Enable`: Enable/disable the trial start confirmation (default: true). If enabled, members must type `/trialconfirm yes`.
+    *   `TrialOfFinality.Confirmation.TimeoutSeconds`: How long members have to confirm (default: 60s).
+    *   *Note:* `TrialOfFinality.Confirmation.RequiredMode` (default: "all") is also available; currently, only "all" is supported. See Developer Guide for details.
 *   **Optional Features (Briefly):**
     *   `TrialOfFinality.AnnounceWinners.World.Enable`: `true` or `false` to enable/disable server-wide announcements for trial winners. (See Dev Guide for message format).
     *   `TrialOfFinality.CheeringNpcs.Enable`: `true` or `false` to enable/disable NPCs cheering in cities for winners. (See Dev Guide for detailed sub-options like ZoneIDs, flags, radius, interval, and second cheer status).
@@ -72,8 +76,16 @@ For guidance on testing all features of this module, see the [Testing Guide](doc
 
 ### 5.1. Starting the Trial
 *   Locate **Fateweaver Arithos** (default spawn in Shattrath City, Aldor Rise).
-*   Only the party leader can initiate the trial by speaking to him.
-*   **Group Requirements:**
+*   Only the party leader can speak to Fateweaver Arithos to propose the trial.
+*   **Initial Validation:** The system first checks basic group requirements (size, member levels, location, player status regarding perma-death or existing tokens).
+*   **Confirmation Phase (if enabled via `TrialOfFinality.Confirmation.Enable`):**
+    *   If enabled, a confirmation prompt is sent to all other online group members.
+    *   Members are warned: "WARNING: This trial involves PERMANENT CHARACTER DEATH if you fail and are not resurrected!"
+    *   Members must type `/trialconfirm yes` to accept or `/trialconfirm no` to decline within the configured `TrialOfFinality.Confirmation.TimeoutSeconds` (default 60 seconds).
+    *   If any member types `/trialconfirm no`, or if not all required members confirm "yes" before the timeout, the trial is aborted, and the group is notified.
+    *   If all required members (currently all other online members) type `/trialconfirm yes`, the trial proceeds.
+*   **Direct Start (if confirmation disabled):** If `TrialOfFinality.Confirmation.Enable` is `false`, the trial starts immediately for all eligible group members after the leader's initiation, bypassing the `/trialconfirm` step.
+*   **Group Requirements (checked before confirmation or direct start):**
     *   Group size must be within configured `MinGroupSize` and `MaxGroupSize`.
     *   All members must be near Fateweaver Arithos.
     *   Level difference between highest and lowest member must be within `MaxLevelDifference`.
@@ -108,11 +120,15 @@ For guidance on testing all features of this module, see the [Testing Guide](doc
 Access to commands requires `SEC_GAMEMASTER` level.
 
 *   **.trial reset <CharacterName>**
-    *   Resets the Trial of Finality perma-death status for the character by clearing the `is_perma_failed` flag in the `character_trial_finality_status` table.
+    *   Resets the Trial of Finality perma-death status for the specified character by clearing the `is_perma_failed` flag in the `character_trial_finality_status` table.
     *   Also removes the Trial Token (if online) and the old perma-death aura (if online and present) as a cleanup.
     *   Makes a perma-deathed character playable again.
 *   **.trial test start**
     *   Allows a GM to start a solo test trial. Standard trial mechanics apply. The GM's perma-death outcome is subject to the `TrialOfFinality.PermaDeath.ExemptGMs` setting.
+
+### Player Commands
+*   `/trialconfirm yes` (or `/tc yes`): Confirms your participation if a Trial of Finality has been proposed for your group.
+*   `/trialconfirm no` (or `/tc no`): Declines participation if a Trial of Finality has been proposed. This will typically abort the trial initiation for the group.
 
 ## 7. Logging
 

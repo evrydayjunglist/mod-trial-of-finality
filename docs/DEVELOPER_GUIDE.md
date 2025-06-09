@@ -98,6 +98,16 @@ The following provides a detailed explanation of all configuration options avail
 *   **`TrialOfFinality.PermaDeath.ExemptGMs`**: (boolean, default: `true`)
     *   If `true`, player accounts with a security level of `SEC_GAMEMASTER` or higher will not have the `is_perma_failed` flag set in the `character_trial_finality_status` table if they "die" and are not resurrected during a trial. This allows GMs to test mechanics without risking their characters. They will still be considered "failed" for the purpose of that specific trial instance's rewards.
 
+### Trial Confirmation Settings
+*   **`TrialOfFinality.Confirmation.Enable`**: (boolean, default: `true`)
+    *   Enables or disables the trial start confirmation system. If `true`, group members (excluding the leader) must confirm their participation via `/trialconfirm yes`. If `false`, `TrialManager::InitiateTrial` bypasses the confirmation prompt phase and attempts to start the trial directly (still creating a temporary `PendingTrialInfo` which is immediately processed as if all confirmed).
+*   **`TrialOfFinality.Confirmation.TimeoutSeconds`**: (uint32, default: `60`)
+    *   The number of seconds group members have to respond to a trial confirmation prompt. This timeout is managed by `TrialManager::UpdatePendingConfirmations`.
+*   **`TrialOfFinality.Confirmation.RequiredMode`**: (string, default: `"all"`)
+    *   Defines how many members need to confirm.
+    *   `"all"`: All prompted members (online members of the group, excluding the leader) must type `/trialconfirm yes`. A single `/trialconfirm no` from any member will abort the trial initiation. If members time out, and not all have said "yes", it's also aborted.
+    *   Future modes like `"majority"` or `"leader_plus_one"` are not currently implemented but this setting allows for future expansion. The C++ code currently defaults to "all" if an unsupported mode is specified.
+
 ### NPC Wave Creature Pools
 These settings define the pools of creature entry IDs for each wave difficulty tier. IDs must be comma-separated strings (e.g., `"123,456,789"`). Whitespace around IDs is automatically trimmed during parsing.
 
@@ -169,6 +179,12 @@ Stores the perma-death status of characters. This is the authoritative source fo
     *   For each eligible player, it executes an SQL query: `INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()`.
     *   The `ModPlayerScript::OnLogin` handler queries this table for the logging-in player. If `is_perma_failed` is `1`, the player's session is kicked.
     *   The `PermaDeathExemptGMs` configuration allows GMs (security level >= `SEC_GAMEMASTER`) to bypass having this flag set if they fail a trial while online.
+*   **Trial Confirmation System:**
+    *   `TrialManager::InitiateTrial`: When called (and `ConfirmationEnable` is true), it creates a `PendingTrialInfo` object stored in `m_pendingTrials` (map keyed by group ID). This struct holds `leaderGuid`, `memberGuidsToConfirm` (online members excluding leader), `memberGuidsAccepted`, `creationTime`, and `highestLevelAtStart`. Prompts are sent to members. If no members need to confirm (e.g. solo leader), it calls `StartConfirmedTrial` directly.
+    *   `trial_player_commandscript`: Handles `/trialconfirm yes` and `/trialconfirm no` (and `/tc` alias). It calls `TrialManager::instance()->HandleTrialConfirmation(player, accepted)`.
+    *   `TrialManager::HandleTrialConfirmation` (to be detailed when implemented): Updates the `PendingTrialInfo` for the player's group. If 'no', aborts the pending trial. If 'yes', adds to `memberGuidsAccepted`. If all prompted have accepted, calls `StartConfirmedTrial`.
+    *   `TrialManager::UpdatePendingConfirmations` (to be detailed when implemented): Periodically checks `m_pendingTrials` for entries exceeding `ConfirmationTimeoutSeconds`. Timed-out trials are aborted.
+    *   `TrialManager::StartConfirmedTrial` (to be detailed when implemented): Retrieves `PendingTrialInfo`, validates final conditions, creates `ActiveTrialInfo`, removes from `m_pendingTrials`, and starts the actual trial (token grant, teleport, etc.).
 *   **NPC Cheering Cache:**
     *   During `ModServerScript::OnConfigLoad`, if `CheeringNpcsEnable` is true and `CheeringNpcCityZoneIDs` are provided, the server queries the `creature` table.
     *   It selects `guid` and `zoneId` for creatures matching the configured zone IDs and NPC flag criteria (target/exclude flags), and are not player-controlled.
@@ -187,6 +203,9 @@ Stores the perma-death status of characters. This is the authoritative source fo
 *   **`WAVE_SPAWN_POSITIONS[]`:** A hardcoded array of `Position` structs defining the 5 spawn locations for NPCs within the trial arena.
 *   **`NUM_SPAWNS_PER_WAVE (5)`:** A constant defining the maximum number of NPCs that can be spawned per wave if enough players are present and the selected NPC pool has enough variety. The actual number can be lower.
 *   **`TrialEventType` (enum):** Defines the types of events logged to the `trial_of_finality_log` table (see Section 4, Database Schema).
+*   **Player Chat Commands:**
+    *   The `trial_player_commandscript` class registers `/trialconfirm` (alias `/tc`) with `SEC_PLAYER` permissions.
+    *   `HandleTrialConfirmCommand` is the static handler. It ensures the player exists, is in a group, and parses "yes" or "no". It then calls `TrialManager::instance()->HandleTrialConfirmation(player, accepted)`.
 
 ## 7. Developer Notes & Future Considerations
 

@@ -23,7 +23,10 @@ Before testing, ensure you have the following:
     *   `trial_of_finality_log` (for event logging)
     *   `character_trial_finality_status` (stores the `is_perma_failed` flag and timestamp)
     *   `character_aura` (to verify `AURA_ID_TRIAL_PERMADEATH` (currently 40000) is cleaned up if it was applied).
-*   **Configuration Awareness:** Be aware of the `TrialOfFinality.PermaDeath.ExemptGMs` and NPC Wave Pool settings (`TrialOfFinality.NpcPools.*`) in `mod_trial_of_finality.conf`. For GMs to test the full perma-death loop on their own characters, `PermaDeath.ExemptGMs` might need to be temporarily set to `false`. Testers may also need to adjust NPC pools to verify specific creature interactions or test edge cases like empty/invalid pools.
+*   **Configuration Awareness:** Be aware of settings in `mod_trial_of_finality.conf`, especially:
+    *   `TrialOfFinality.PermaDeath.ExemptGMs`: For GMs to test the full perma-death loop on their own characters, this might need to be temporarily set to `false`.
+    *   `TrialOfFinality.NpcPools.*`: Testers may need to adjust NPC pools to verify specific creature interactions or test edge cases.
+    *   `TrialOfFinality.Confirmation.Enable`, `TrialOfFinality.Confirmation.TimeoutSeconds`, `TrialOfFinality.Confirmation.RequiredMode`: These will need adjustment for specific confirmation system test scenarios (e.g., shorter timeout for testing timeouts).
 
 ## 3. Testing Areas
 
@@ -50,6 +53,32 @@ Before testing, ensure you have the following:
     *   Attempt to start with a player whose character has `is_perma_failed = 1` in `character_trial_finality_status` (should fail).
 *   **A.8. Playerbot Exclusion:**
     *   If using `mod-playerbots`, ensure groups with playerbots cannot start the trial.
+*   **A.9. Trial Confirmation System (New):**
+    *   **All Members Accept:**
+        *   With `Confirmation.Enable = true` and `Confirmation.RequiredMode = "all"`.
+        *   Leader initiates. Other online members type `/trialconfirm yes` (or `/tc yes`).
+        *   Expected: Trial starts successfully after all members confirm. Verify chat messages.
+    *   **One Member Declines:**
+        *   Leader initiates. One member types `/trialconfirm no`.
+        *   Expected: Trial initiation is aborted. All members (especially leader and decliner) receive appropriate notifications. No trial starts.
+    *   **Member Timeout:**
+        *   Leader initiates. One or more members do not respond within `Confirmation.TimeoutSeconds`.
+        *   Expected: Trial initiation is aborted. All members receive timeout notifications. (Test with a short timeout value).
+    *   **Leader Initiates New Confirmation While Previous is Pending:**
+        *   Leader starts confirmation. Before it resolves, leader tries to talk to Fateweaver Arithos again to start another.
+        *   Expected: System message "Your group already has a pending Trial of Finality confirmation." Leader cannot start a new one.
+    *   **Player Uses `/trialconfirm` with No Pending Trial:**
+        *   Player types `/trialconfirm yes` when no trial confirmation is active for their group.
+        *   Expected: System message like "There is no pending trial confirmation for your group." or command fails silently/gracefully.
+    *   **Player Uses `/trialconfirm` Not in Group:**
+        *   Player types `/trialconfirm yes` while not in a group.
+        *   Expected: System message "You must be in a group to use this command."
+    *   **Varying Group Sizes:** Test confirmation flow with different numbers of online members (e.g., 2 players including leader, up to MaxGroupSize).
+    *   **Confirmation Disabled:**
+        *   Set `TrialOfFinality.Confirmation.Enable = false`.
+        *   Leader initiates trial.
+        *   Expected: Trial starts directly for all eligible group members without requiring `/trialconfirm`.
+    *   **Message Verification:** Check all system messages related to confirmation (prompts, acceptance, decline, timeout, abortion) for clarity and correctness.
 
 ### B. Wave Mechanics
 

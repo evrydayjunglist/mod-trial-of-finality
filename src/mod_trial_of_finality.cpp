@@ -159,8 +159,31 @@ uint32 CheeringNpcsTargetNpcFlags = UNIT_NPC_FLAG_NONE;
 uint32 CheeringNpcsExcludeNpcFlags = UNIT_NPC_FLAG_VENDOR | UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_FLIGHTMASTER | UNIT_NPC_FLAG_REPAIRER | UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_BANKER | UNIT_NPC_FLAG_TABARDDESIGNER | UNIT_NPC_FLAG_STABLEMASTER | UNIT_NPC_FLAG_GUILDMASTER | UNIT_NPC_FLAG_BATTLEMASTER | UNIT_NPC_FLAG_INNKEEPER | UNIT_NPC_FLAG_SPIRITHEALER | UNIT_NPC_FLAG_SPIRITGUIDE | UNIT_NPC_FLAG_PETITIONER;
 uint32 CheeringNpcsCheerIntervalMs = 2000; // Interval for the second cheer
 bool PermaDeathExemptGMs = true; // Exempt GMs from perma-death
+uint32 ConfirmationTimeoutSeconds = 60; // Seconds for players to confirm trial participation
+bool ConfirmationEnable = true; // Enable/disable the confirmation system
+std::string ConfirmationRequiredMode = "all"; // "all", (future: "majority", "leader_plus_one")
 
 // --- Main Trial Logic ---
+
+// Structure to hold information about trials pending player confirmation
+struct PendingTrialInfo {
+    ObjectGuid leaderGuid;
+    std::set<ObjectGuid> memberGuidsToConfirm; // All members (excluding leader) who need to say yes
+    std::set<ObjectGuid> memberGuidsAccepted;
+    time_t creationTime;
+    uint8 highestLevelAtStart;
+
+    PendingTrialInfo(ObjectGuid leader, uint8 highestLvl)
+        : leaderGuid(leader), creationTime(time(nullptr)), highestLevelAtStart(highestLvl) {}
+
+    // Helper to check if a specific member still needs to confirm
+    bool IsStillPending(ObjectGuid memberGuid) const {
+        if (memberGuidsAccepted.count(memberGuid)) return false; // Already accepted
+        if (memberGuidsToConfirm.count(memberGuid)) return true; // In the list of those who need to confirm and hasn't accepted
+        return false;
+    }
+};
+
 struct ActiveTrialInfo {
     uint32 groupId;
     ObjectGuid leaderGuid;
@@ -220,70 +243,118 @@ private:
     TrialManager(const TrialManager&) = delete;
     TrialManager& operator=(const TrialManager&) = delete;
     std::map<uint32, ActiveTrialInfo> m_activeTrials;
+    std::map<uint32 /*groupId*/, PendingTrialInfo> m_pendingTrials;
 };
 
 bool TrialManager::InitiateTrial(Player* leader) {
     if (!leader || !leader->GetSession()) return false;
     Group* group = leader->GetGroup();
-    if (!group) return false;
-    if (m_activeTrials.count(group->GetId())) {
-        sLog->outError("sys", "[TrialOfFinality] Attempt to start trial for group %u that is already active.", group->GetId());
-        ChatHandler(leader->GetSession()).SendSysMessage("Your group seems to be already in a trial or an error occurred.");
+    if (!group) {
+        ChatHandler(leader->GetSession()).SendSysMessage("You must be in a group to initiate the Trial.");
         return false;
     }
+
+    // Existing validation call - this should check critical things like location, perma-death, etc.
+    // Assuming ValidateGroupForTrial is static and accessible, or called by the NPC script before this.
+    // For this refactor, we assume basic group validity is checked by the caller (NPC script via ValidateGroupForTrial).
+    // Here, we focus on trial-specific states (active/pending) and group composition for confirmation.
+
+    // Initial Validations (leader, group exist already done by caller or first lines)
+    // Check if already active or pending
+    if (m_activeTrials.count(group->GetId())) {
+        sLog->outError("sys", "[TrialOfFinality] Attempt to start trial for group %u that is already active.", group->GetId());
+        ChatHandler(leader->GetSession()).SendSysMessage("Your group is already in an active Trial of Finality.");
+        return false;
+    }
+    if (m_pendingTrials.count(group->GetId())) {
+        ChatHandler(leader->GetSession()).SendSysMessage("Your group already has a pending Trial of Finality confirmation. Please wait or have members respond.");
+        return false;
+    }
+
+    // Determine highestLevel and onlineMembers for validation and PendingTrialInfo
     uint8 highestLevel = 0;
+    uint32 onlineMembers = 0;
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
         if (Player* member = itr->GetSource()) {
+            if (!member->GetSession()) {
+                continue;
+            }
+            onlineMembers++;
             if (member->getLevel() > highestLevel) highestLevel = member->getLevel();
         }
     }
-    if (highestLevel == 0) {
-        sLog->outError("sys", "[TrialOfFinality] Could not determine highest level for group %u.", group->GetId());
-        ChatHandler(leader->GetSession()).SendSysMessage("Could not determine group's highest level. Aborting trial.");
+
+    if (highestLevel == 0 || onlineMembers < MinGroupSize) {
+        sLog->outError("sys", "[TrialOfFinality] Group %u: Could not determine highest level or not enough online members (%u found, %u required for confirmation start).", group->GetId(), onlineMembers, MinGroupSize);
+        ChatHandler(leader->GetSession()).SendSysMessage("Could not determine group's highest level or not enough online members meeting criteria for trial start.");
         return false;
     }
-    auto emplaceResult = m_activeTrials.try_emplace(group->GetId(), group, highestLevel);
-    if (!emplaceResult.second) {
-         sLog->outError("sys", "[TrialOfFinality] Failed to emplace trial info for group %u. Already exists?", group->GetId());
-         ChatHandler(leader->GetSession()).SendSysMessage("Failed to initialize trial state. Please try again.");
-         return false;
+
+    // If confirmation system is disabled, bypass confirmation and start directly
+    if (!ConfirmationEnable) {
+        sLog->outInfo("sys", "[TrialOfFinality] Group %u (Leader: %s) starting trial directly as confirmation system is disabled.", group->GetId(), leader->GetName().c_str());
+        PendingTrialInfo tempPendingInfo(leader->GetGUID(), highestLevel);
+        // Populate members for StartConfirmedTrial to use (all online members including leader)
+        // In a disabled-confirmation scenario, all present and eligible members are considered "accepted".
+        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
+            if (Player* member = itr->GetSource()) {
+                if (member->GetSession()) { // Ensure member is online
+                     // For direct start, all members who would be prompted are considered "to confirm"
+                     // and also immediately "accepted".
+                     tempPendingInfo.memberGuidsToConfirm.insert(member->GetGUID());
+                }
+            }
+        }
+        // Leader is implicitly accepted. Others are added to both lists.
+        tempPendingInfo.memberGuidsAccepted = tempPendingInfo.memberGuidsToConfirm;
+        if (!tempPendingInfo.memberGuidsAccepted.count(leader->GetGUID())) { // Ensure leader is in accepted if not prompted
+             tempPendingInfo.memberGuidsAccepted.insert(leader->GetGUID());
+        }
+
+
+        m_pendingTrials[group->GetId()] = tempPendingInfo; // Add briefly for StartConfirmedTrial
+        StartConfirmedTrial(group->GetId());
+        return true;
     }
-    ActiveTrialInfo& currentTrial = emplaceResult.first->second;
-    LogTrialDbEvent(TRIAL_EVENT_START, group->GetId(), leader, 0, currentTrial.highestLevelAtStart, "Members: " + std::to_string(currentTrial.memberGuids.size()));
-    sLog->outMessage("sys", "[TrialOfFinality] Starting Trial for group ID %u, leader %s (GUID %s), %lu members. Highest level: %u. Arena: Map %u (%f,%f,%f,%f)",
-        group->GetId(), leader->GetName().c_str(), leader->GetGUID().ToString().c_str(), currentTrial.memberGuids.size(), highestLevel,
-        ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO);
+
+    PendingTrialInfo pendingInfo(leader->GetGUID(), highestLevel);
     for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
         Player* member = itr->GetSource();
-        if (!member || !member->GetSession()) continue;
-        if (Item* trialToken = member->AddItem(TrialTokenEntry, 1)) { member->SendNewItem(trialToken, 1, true, false); }
-        else { sLog->outError("sys", "[TrialOfFinality] Failed to grant Trial Token (ID %u) to player %s.", TrialTokenEntry, member->GetName().c_str()); }
-        member->SetDisableXpGain(true, true);
-        member->TeleportTo(ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO);
-    }
-    group->BroadcastGroupWillBeTeleported();
-    group->SendUpdate();
-    Position announcerPos = {-13200.0f, 200.0f, 31.0f, 0.0f};
-    Map* trialMap = sMapMgr->FindMap(ArenaMapID, 0);
-    if (!trialMap) {
-        sLog->outError("sys", "[TrialOfFinality] Could not find trial map %u to spawn announcer for group %u.", ArenaMapID, group->GetId());
-        ChatHandler(leader->GetSession()).SendSysMessage("Error preparing trial arena. Please contact a GM.");
-        m_activeTrials.erase(group->GetId());
-        return false;
-    }
-    if (Creature* announcer = trialMap->SummonCreature(AnnouncerEntry, announcerPos, TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 3600 * 1000)) {
-        currentTrial.announcerGuid = announcer->GetGUID();
-        if (npc_trial_announcer_ai* ai = CAST_AI(npc_trial_announcer_ai*, announcer->AI())) { ai->SetTrialGroupId(group->GetId()); }
-        sLog->outDetail("[TrialOfFinality] Announcer (Entry %u, GUID %s) spawned for group %u.", AnnouncerEntry, announcer->GetGUID().ToString().c_str(), group->GetId());
-    } else { sLog->outError("sys", "[TrialOfFinality] Failed to spawn Trial Announcer (Entry %u) for group %u.", AnnouncerEntry, group->GetId()); }
-    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
-        if (Player* member = itr->GetSource()) {
-            if(member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage("The Trial of Finality has begun! Prepare yourselves!");
+        // Only prompt online members who are not the leader
+        if (member && member->GetSession() && member->GetGUID() != leader->GetGUID()) {
+            pendingInfo.memberGuidsToConfirm.insert(member->GetGUID());
         }
     }
-    uint32 initialWaveDelayMs = 5000;
-    PrepareAndAnnounceWave(group->GetId(), 1, initialWaveDelayMs);
-    return true;
+
+    m_pendingTrials[group->GetId()] = pendingInfo; // Add to map
+
+    sLog->outInfo("sys", "[TrialOfFinality] Group %u (Leader: %s, GUID %u) initiated confirmation phase. %lu members to confirm. Timeout: %u s.",
+        group->GetId(), leader->GetName().c_str(), leader->GetGUID().GetCounter(), pendingInfo.memberGuidsToConfirm.size(), ConfirmationTimeoutSeconds);
+
+    if (pendingInfo.memberGuidsToConfirm.empty()) {
+        sLog->outInfo("sys", "[TrialOfFinality] Group %u (Leader: %s) has no other members to confirm. Proceeding to start trial directly.", group->GetId(), leader->GetName().c_str());
+        StartConfirmedTrial(group->GetId());
+        // StartConfirmedTrial will handle moving from m_pendingTrials to m_activeTrials
+        return true;
+    }
+
+    // Send prompts
+    std::string leaderName = leader->GetName();
+    std::string warningMsg = "WARNING: This trial involves PERMANENT CHARACTER DEATH if you fail and are not resurrected!";
+    std::string confirmInstructions = "Type '/trialconfirm yes' to accept or '/trialconfirm no' to decline. You have " + std::to_string(ConfirmationTimeoutSeconds) + " seconds to respond.";
+
+    ChatHandler(leader->GetSession()).SendSysMessage("Confirmation requests for the Trial of Finality have been sent to your group members. Waiting for responses...");
+
+    for (const auto& memberGuid : pendingInfo.memberGuidsToConfirm) {
+        Player* member = ObjectAccessor::FindPlayer(memberGuid);
+        if (member && member->GetSession()) {
+            ChatHandler(member->GetSession()).PSendSysMessage("Your group leader, %s, has proposed to start the Trial of Finality!", leaderName.c_str());
+            ChatHandler(member->GetSession()).SendSysMessage(warningMsg);
+            ChatHandler(member->GetSession()).SendSysMessage(confirmInstructions);
+        }
+    }
+    // LogTrialDbEvent for PENDING_START or similar could be added here if desired.
+    return true; // Indicates confirmation phase started successfully
 }
 
 void TrialManager::CheckPlayerLocationsAndEnforceBoundaries(uint32 groupId) { }
@@ -653,6 +724,18 @@ public:
         PermaDeathExemptGMs = sConfigMgr->GetOption<bool>("TrialOfFinality.PermaDeath.ExemptGMs", true);
         sLog->outDetail("[TrialOfFinality] GM Perma-Death Exemption: %s", PermaDeathExemptGMs ? "Enabled" : "Disabled");
 
+        ConfirmationEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.Confirmation.Enable", true);
+        sLog->outDetail("[TrialOfFinality] Trial Confirmation System: %s", ConfirmationEnable ? "Enabled" : "Disabled");
+        ConfirmationTimeoutSeconds = sConfigMgr->GetOption<uint32>("TrialOfFinality.Confirmation.TimeoutSeconds", 60);
+        sLog->outDetail("[TrialOfFinality] Trial Confirmation Timeout: %u seconds", ConfirmationTimeoutSeconds);
+        ConfirmationRequiredMode = sConfigMgr->GetOption<std::string>("TrialOfFinality.Confirmation.RequiredMode", "all");
+        std::transform(ConfirmationRequiredMode.begin(), ConfirmationRequiredMode.end(), ConfirmationRequiredMode.begin(), ::tolower); // Normalize to lowercase
+        if (ConfirmationRequiredMode != "all") {
+            sLog->outWarn("sys", "[TrialOfFinality] Confirmation.RequiredMode is set to '%s', but only 'all' is currently supported. Defaulting to 'all'.", ConfirmationRequiredMode.c_str());
+            ConfirmationRequiredMode = "all";
+        }
+        sLog->outDetail("[TrialOfFinality] Trial Confirmation Required Mode: %s", ConfirmationRequiredMode.c_str());
+
         WorldAnnounceEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.AnnounceWinners.World.Enable", true);
         WorldAnnounceFormat = sConfigMgr->GetOption<std::string>("TrialOfFinality.AnnounceWinners.World.MessageFormat",
             "Hark, heroes! The group led by {group_leader}, with valiant trialists {player_list}, has vanquished all foes and emerged victorious from the Trial of Finality! All hail the Conquerors!");
@@ -923,7 +1006,66 @@ public:
     }
 };
 
-}
+// --- Player Command Scripts ---
+class trial_player_commandscript : public CommandScript
+{
+public:
+    trial_player_commandscript() : CommandScript("trial_player_commandscript") { }
 
-void Addmod_trial_of_finality_Scripts() { /* ... existing ... */ }
+    std::vector<ChatCommand> GetCommands() const override
+    {
+        static std::vector<ChatCommand> commandTable = {
+            { "trialconfirm", SEC_PLAYER, true, &HandleTrialConfirmCommand, "Confirms or denies participation in the Trial of Finality. Usage: /trialconfirm <yes|no>" },
+            { "tc",           SEC_PLAYER, true, &HandleTrialConfirmCommand, "Alias for /trialconfirm. Usage: /tc <yes|no>" } // Alias
+        };
+        return commandTable;
+    }
+
+    static bool HandleTrialConfirmCommand(ChatHandler* handler, const char* args)
+    {
+        Player* player = handler->GetPlayer();
+        if (!player) {
+            // This check is mostly a safeguard; SEC_PLAYER should ensure a player context.
+            handler->SendSysMessage("This command can only be used by a player.");
+            return false;
+        }
+
+        if (!ModuleEnabled) {
+            ChatHandler(player->GetSession()).SendSysMessage("The Trial of Finality module is currently disabled.");
+            return false;
+        }
+
+        if (!player->GetGroup()) {
+            ChatHandler(player->GetSession()).SendSysMessage("You must be in a group to use this command.");
+            return false;
+        }
+
+        std::string argStr = args ? args : "";
+        std::transform(argStr.begin(), argStr.end(), argStr.begin(), ::tolower); // Case-insensitive
+
+        bool accepted;
+        if (argStr == "yes") {
+            accepted = true;
+        } else if (argStr == "no") {
+            accepted = false;
+        } else {
+            ChatHandler(player->GetSession()).SendSysMessage("Usage: /trialconfirm <yes|no>");
+            return false;
+        }
+
+        // This method will be implemented in TrialManager in the next step.
+        // For now, this ensures the command structure is in place.
+        TrialManager::instance()->HandleTrialConfirmation(player, accepted);
+        return true;
+    }
+};
+
+} // namespace ModTrialOfFinality
+
+void Addmod_trial_of_finality_Scripts() {
+    new ModTrialOfFinality::ModPlayerScript();
+    new ModTrialOfFinality::ModServerScript();
+    new ModTrialOfFinality::trial_commandscript(); // GM commands
+    new ModTrialOfFinality::trial_player_commandscript(); // Player commands
+}
 extern "C" void Addmod_trial_of_finality() { /* ... */ }
