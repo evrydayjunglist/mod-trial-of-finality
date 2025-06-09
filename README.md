@@ -12,7 +12,7 @@
 *   Teleportation to a dedicated arena (configurable, defaults to Gurubashi Arena).
 *   XP gain disabled during the trial.
 *   5 waves of NPCs, with increasing difficulty.
-*   **Dynamic Wave Scaling:** Number of NPCs per wave adjusts based on the number of currently active (not perma-deathed) players.
+*   **Dynamic & Varied Waves:** Number of NPCs per wave adjusts based on active player count. Each NPC within a wave is a *distinct type*, randomly selected from predefined pools for that wave's difficulty tier, ensuring varied encounters.
 *   Custom **Trial Announcer** NPC for flavor dialogue and wave announcements.
 *   **Perma-Death Mechanic:** Dying with the Trial Token and not being resurrected before the current wave ends results in permanent character disablement.
 *   **Combat Resurrection:** Players can be resurrected by teammates (any combat-capable resurrection) during a wave to avoid perma-death for that specific death event.
@@ -37,7 +37,7 @@
         4.  `npc_fateweaver_arithos_spawn.sql` (Spawns Fateweaver Arithos)
         5.  `npc_trial_announcer_template.sql` (Creature template for the Trial Announcer NPC)
         6.  `log_table_trial_of_finality.sql` (Creates the database table for logging trial events)
-        7.  *(Optional)* SQL files for wave creature templates if you used custom entries (e.g., 70001, 70002, 70003) and they don't exist in your DB. Default implementation uses placeholder IDs that need to be valid.
+        7.  *(Optional)* SQL files for wave creature templates if you used custom entries (e.g., 70001-70030 from the default pools) and they don't exist in your DB.
 
 ## 4. Setup & Configuration
 
@@ -60,11 +60,15 @@ Key configuration options (see the `.conf` file for default values and comments)
 
 Placeholder Aura ID for Perma-Death: `AURA_ID_TRIAL_PERMADEATH = 40000`. Ensure this aura ID is a passive, persistent aura in your DBCs, or change it to one that is.
 
-Placeholder Creature IDs for Waves:
-*   `CREATURE_ENTRY_WAVE_EASY = 70001`
-*   `CREATURE_ENTRY_WAVE_MEDIUM = 70002`
-*   `CREATURE_ENTRY_WAVE_HARD = 70003`
-    Ensure these creature templates exist in your database, or update these constants in `src/mod_trial_of_finality.cpp` to use existing creature IDs.
+### Placeholder Creature ID Pools for Waves
+The module now spawns distinct, randomly selected NPCs for each wave from predefined pools. You **must** ensure the creature IDs listed in these pools in `src/mod_trial_of_finality.cpp` correspond to actual creature templates in your database, or update the pools with valid IDs. Each pool should ideally contain at least 5-10 distinct creature IDs appropriate for the difficulty tier.
+
+Default placeholder pools in `src/mod_trial_of_finality.cpp` are:
+*   `POOL_WAVE_CREATURES_EASY`: Contains IDs like `70001` through `70010`. Intended for Waves 1 & 2.
+*   `POOL_WAVE_CREATURES_MEDIUM`: Contains IDs like `70011` through `70020`. Intended for Waves 3 & 4. These also receive a 20% health boost.
+*   `POOL_WAVE_CREATURES_HARD`: Contains IDs like `70021` through `70030`. Intended for Wave 5. These also receive a 50% health boost.
+
+**It is crucial to customize these creature ID pools with entries suitable for your server's balance and available custom NPCs.**
 
 ## 5. Gameplay Mechanics
 
@@ -83,7 +87,8 @@ Placeholder Creature IDs for Waves:
 *   Upon starting, all group members receive a **Trial Token**, have XP gain disabled, and are teleported to the arena.
 *   The **Trial Announcer** will announce incoming waves.
 *   There are 5 waves of NPCs.
-*   **Wave Scaling:** The number of NPCs per wave scales based on the number of currently active (not perma-deathed) players in the trial. Creature levels are set to the highest level present in the group when the trial started. Creatures in later waves have increased health.
+*   **Wave Scaling:** The number of NPCs per wave scales based on the number of currently active (not perma-deathed) players in the trial.
+*   Creature levels are set to the highest level present in the group when the trial started. For each wave, a set of *distinct* NPC types are randomly selected from a pre-defined pool for that wave's difficulty tier (Easy, Medium, Hard). Creatures in later waves also receive a health boost (e.g., +20% for medium waves, +50% for hard wave).
 
 ### 5.3. Death, Resurrection, and Perma-Death
 *   If a player dies while holding the Trial Token, they enter a "downed" state for the current wave. They become a ghost.
@@ -131,7 +136,7 @@ Access to commands requires `SEC_GAMEMASTER` level.
 
 ## 8. Developer Notes & Future Considerations
 *   The perma-death mechanism currently uses a placeholder Aura ID (`40000`). This should be verified or changed to a suitable passive, persistent aura in your DBC setup. A database flag in a custom table would be a more robust alternative for future development.
-*   Creature entries for waves (`70001`, `70002`, `70003`) are placeholders. Update these in `src/mod_trial_of_finality.cpp` or create these custom NPCs.
+*   Creature entries for waves (`70001`-`70030`) are placeholders. Update these in `src/mod_trial_of_finality.cpp` or create these custom NPCs.
 *   Wave difficulty scaling currently adjusts NPC count and provides a basic health multiplier for later waves. More complex stat scaling or varied NPC abilities per wave could be added.
 *   Consider randomizing NPC types for waves from predefined lists to enhance replayability.
 *   World announcements for trial winners could be a future addition.
