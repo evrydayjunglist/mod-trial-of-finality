@@ -2,7 +2,7 @@
 
 ## 1. Introduction
 
-This guide outlines a comprehensive testing and balancing strategy for the `mod_trial_of_finality` AzerothCore module. Its purpose is to ensure all features function as intended, the module is stable, and the gameplay experience is challenging yet fair.
+This guide outlines a comprehensive testing and balancing strategy for the `mod_trial_of_finality` AzerothCore module. Its purpose is to ensure all features function as intended, the module is stable, and the gameplay experience is challenging yet fair. For an overview of features, installation, and user configuration, please see the main [README.md](../README.md). For deep technical details, refer to the [Developer Guide](DEVELOPER_GUIDE.md).
 
 ## 2. Prerequisites/Setup
 
@@ -184,7 +184,7 @@ Before testing, ensure you have the following:
 ### I. Database Logging
 
 *   **I.1. Event Type Coverage:**
-    *   Attempt to trigger every `TrialEventType` (e.g., `TRIAL_EVENT_START`, `TRIAL_EVENT_WAVE_START`, `TRIAL_EVENT_PLAYER_DEATH_TOKEN`, etc.).
+    *   Attempt to trigger every `TrialEventType`. For a detailed list of `TrialEventType` enum values and their meanings, refer to the [Developer Guide](DEVELOPER_GUIDE.md#database-schema).
     *   Query the `trial_of_finality_log` table.
     *   Verify each event is logged with the correct `event_type` string.
     *   Query the `character_trial_finality_status` table to cross-reference perma-death events.
