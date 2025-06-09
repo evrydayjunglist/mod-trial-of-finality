@@ -160,6 +160,7 @@ int CheeringNpcsMaxTotalWorld = 50;
 uint32 CheeringNpcsTargetNpcFlags = UNIT_NPC_FLAG_NONE;
 uint32 CheeringNpcsExcludeNpcFlags = UNIT_NPC_FLAG_VENDOR | UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_FLIGHTMASTER | UNIT_NPC_FLAG_REPAIRER | UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_BANKER | UNIT_NPC_FLAG_TABARDDESIGNER | UNIT_NPC_FLAG_STABLEMASTER | UNIT_NPC_FLAG_GUILDMASTER | UNIT_NPC_FLAG_BATTLEMASTER | UNIT_NPC_FLAG_INNKEEPER | UNIT_NPC_FLAG_SPIRITHEALER | UNIT_NPC_FLAG_SPIRITGUIDE | UNIT_NPC_FLAG_PETITIONER;
 uint32 CheeringNpcsCheerIntervalMs = 2000; // Interval for the second cheer
+bool PermaDeathExemptGMs = true; // Exempt GMs from perma-death
 
 // --- Main Trial Logic ---
 struct ActiveTrialInfo { /* ... as of Step 11d ... */
@@ -317,32 +318,45 @@ void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, con
                 ObjectGuid playerGuid = pair.first;
                 if (trialInfo->permanentlyFailedPlayerGuids.count(playerGuid)) { continue; }
                 Player* downedPlayer_obj = ObjectAccessor::FindPlayer(playerGuid);
-                if (downedPlayer_obj && downedPlayer_obj->GetSession()) {
-                    // Apply DB flag for online player
-                    CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
-                        downedPlayer_obj->GetGUID().GetCounter());
 
-                    trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid); // Keep tracking for current trial instance logic
+                // This line should be called for any player who failed this trial instance, for internal tracking (rewards, scaling).
+                trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid);
 
-                    std::string safe_reason = reason;
-                    CharacterDatabase.EscapeString(safe_reason);
+                if (downedPlayer_obj && downedPlayer_obj->GetSession()) // Player is online
+                {
+                    if (PermaDeathExemptGMs && downedPlayer_obj->GetSession()->GetSecurity() >= SEC_GAMEMASTER) // Check security level (adjust if using different GM levels)
+                    {
+                        sLog->outInfo("sys", "[TrialOfFinality] GM Player %s (GUID %s, Account %u, Group %u) is EXEMPT from perma-death DB flag due to configuration and GM status.",
+                            downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), downedPlayer_obj->GetSession()->GetAccountId(), groupId);
+                        // GM is "down" for the trial's reward/state purposes, but no persistent DB flag.
+                        // Aura cleanup (if any was applied before this new logic)
+                        if (downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) downedPlayer_obj->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
+                    }
+                    else
+                    {
+                        CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
+                            playerGuid.GetCounter());
 
-                    LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer_obj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Perma-death DB flag set: " + safe_reason);
-                    sLog->outCritical("[TrialOfFinality] Player %s (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).",
-                        downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
-                    ChatHandler(downedPlayer_obj->GetSession()).SendSysMessage("The trial has ended in failure. Your fate is sealed.");
-                    // Remove aura if it was applied, as DB is now the master record
-                    if (downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) downedPlayer_obj->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
-
-                } else { // Player is offline
+                        std::string safe_reason = reason;
+                        CharacterDatabase.EscapeString(safe_reason);
+                        LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer_obj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Perma-death DB flag set: " + safe_reason);
+                        sLog->outCritical("[TrialOfFinality] Player %s (GUID %s, Account %u, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).",
+                            downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), downedPlayer_obj->GetSession()->GetAccountId(), groupId, reason.c_str(), trialInfo->currentWave);
+                        ChatHandler(downedPlayer_obj->GetSession()).SendSysMessage("The trial has ended in failure. Your fate is sealed.");
+                        // Ensure aura is removed as DB is master
+                        if (downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) downedPlayer_obj->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
+                    }
+                }
+                else // Player is offline
+                {
+                    // For offline players, apply perma-death regardless of GM status for now,
+                    // as reliably checking security level without a session is complex.
+                    // GMs who were offline and failed can use .trial reset.
                     CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
                         playerGuid.GetCounter());
 
-                    trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid); // Keep tracking for current trial instance logic
-
                     std::string safe_reason_offline = reason;
                     CharacterDatabase.EscapeString(safe_reason_offline);
-
                     LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player GUID " + playerGuid.ToString() + " (offline) - Perma-death DB flag set: " + safe_reason_offline);
                     sLog->outCritical("[TrialOfFinality] Offline Player (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).", playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
                 }
@@ -541,6 +555,8 @@ public:
         NpcScalingMode = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Mode", "match_highest_level");
         DisableCharacterMethod = sConfigMgr->GetOption<std::string>("TrialOfFinality.DisableCharacter.Method", "custom_flag");
         GMDebugEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.GMDebug.Enable", false);
+        PermaDeathExemptGMs = sConfigMgr->GetOption<bool>("TrialOfFinality.PermaDeath.ExemptGMs", true);
+        sLog->outDetail("[TrialOfFinality] GM Perma-Death Exemption: %s", PermaDeathExemptGMs ? "Enabled" : "Disabled");
 
         WorldAnnounceEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.AnnounceWinners.World.Enable", true);
         WorldAnnounceFormat = sConfigMgr->GetOption<std::string>("TrialOfFinality.AnnounceWinners.World.MessageFormat",

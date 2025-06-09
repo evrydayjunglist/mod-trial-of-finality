@@ -61,6 +61,7 @@ Key configuration options (see the `.conf` file for default values and comments)
 *   `TrialOfFinality.GMDebug.Enable`: (Not currently used to gate GM commands, they are available if module is enabled).
 *   `TrialOfFinality.AnnounceWinners.World.Enable`: (true/false) Enables or disables world announcements upon successful trial completion. Default: `true`.
 *   `TrialOfFinality.AnnounceWinners.World.MessageFormat`: String format for the world announcement. Placeholders: `{group_leader}`, `{player_list}`.
+*   `TrialOfFinality.PermaDeath.ExemptGMs`: (true/false) If `true`, Game Master accounts (security level `SEC_GAMEMASTER` or higher) will not have the perma-death flag set in the database if they fail the trial. This allows GMs to test the mechanics without risk to their characters. Default: `true`.
 
 ### NPC Cheering Settings
 
@@ -116,7 +117,8 @@ Default placeholder pools in `src/mod_trial_of_finality.cpp` are:
     *   They are marked as `permanentlyFailed` for the remainder of this trial instance (internal tracking).
     *   The trial *continues* for any remaining active players. Future waves will scale to the new group size.
     *   Players whose characters have the `is_perma_failed = 1` flag in the database will be kicked from the game upon their next login and will be unable to log into that character again (unless a GM intervenes).
-*   **Group Wipe:** If all currently active players in the trial are downed simultaneously (or disconnect), the trial ends in failure. All players who were "downed" at that point will have the perma-death flag set in the database.
+    *   Note: If `TrialOfFinality.PermaDeath.ExemptGMs` is enabled, Game Master accounts (security level `SEC_GAMEMASTER` or higher) will not have this flag set, allowing them to test without permanent consequences to their characters.
+*   **Group Wipe:** If all currently active players in the trial are downed simultaneously (or disconnect), the trial ends in failure. All players who were "downed" at that point will have the perma-death flag set in the database (unless they are GMs and the exemption is active).
 
 ### 5.4. Trial Success
 *   Successfully defeating all 5 waves while at least one original member remains active (not perma-deathed) results in trial success.
@@ -144,7 +146,7 @@ Access to commands requires `SEC_GAMEMASTER` level.
 *   **.trial test start**
     *   Allows a GM to start a solo test version of the Trial of Finality for themselves.
     *   Bypasses normal group validation. The GM acts as a solo participant.
-    *   The trial mechanics (token, XP disable, teleport, waves, announcer, death rules) apply to the GM. Useful for testing.
+    *   The trial mechanics (token, XP disable, teleport, waves, announcer, death rules) apply to the GM. Note that the outcome regarding perma-death for the GM character is subject to the `TrialOfFinality.PermaDeath.ExemptGMs` configuration setting. Useful for testing.
 
 ## 7. Logging
 
