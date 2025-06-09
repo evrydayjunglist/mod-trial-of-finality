@@ -1,3 +1,5 @@
+# WORK IN PROGRESS!!!!
+
 # AzerothCore Module: Trial of Finality (`mod_trial_of_finality`)
 
 ## 1. Overview
@@ -25,9 +27,9 @@
 ## 3. Installation
 
 1.  **Copy Module Files:**
+    *   Git clone https://github.com/Stuntmonkey4u/mod_trial_of_finality.git
     *   Place the entire `mod_trial_of_finality` directory into your AzerothCore's `modules` directory.
-2.  **CMake:**
-    *   Add `add_subdirectory(mod_trial_of_finality)` to your server's main `CMakeLists.txt` in the `modules` section.
+3.  **CMake:**
     *   Re-run CMake and rebuild your server.
 3.  **Database Setup:**
     *   This module uses AzerothCore's integrated SQL update system.
@@ -134,3 +136,24 @@ Key trial events are logged to the `trial_of_finality_log` database table and al
 ## 8. Advanced Information & Development
 
 For detailed technical information about all configuration options, internal systems, database schema, contribution guidelines, or future development notes, please refer to the [Developer Guide](docs/DEVELOPER_GUIDE.md).
+
+
+## License
+
+This script is licensed under the **MIT License**. Feel free to modify and use it as needed.
+
+---
+
+## Disclaimer
+
+This script is provided as-is, with no warranties or guarantees. Use at your own risk. Make sure to backup your server data before running any script that modifies or updates your environment.
+
+---
+
+## Contributors (So Far...)
+
+Created by Stuntmonkey4u
+
+## Pull Request
+
+If you have an improvement or idea, make a pull request, get your name added to the Contributors list!!
