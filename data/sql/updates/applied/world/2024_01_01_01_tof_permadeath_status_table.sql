@@ -1,4 +1,3 @@
-DROP TABLE IF EXISTS `character_trial_finality_status`;
 CREATE TABLE IF NOT EXISTS `character_trial_finality_status` (
   `guid` INT UNSIGNED NOT NULL COMMENT 'Character GUID',
   `is_perma_failed` TINYINT(1) UNSIGNED NOT NULL DEFAULT 0 COMMENT '0 = Not failed, 1 = Perma-failed in Trial of Finality',
