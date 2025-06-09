@@ -1,3 +1,5 @@
+# WORK IN PROGRESS!!!!
+
 # AzerothCore Module: Trial of Finality (`mod-trial-of-finality`)
 
 ## 1. Overview
@@ -25,11 +27,12 @@
 ## 3. Installation
 
 1.  **Copy Module Files:**
+    *   git clone https://github.com/Stuntmonkey4u/mod-trial-of-finality.git
     *   Place the entire `mod-trial-of-finality` directory into your AzerothCore's `modules` directory.
-2.  **CMake:**
+3.  **CMake:**
     *   Add `add_subdirectory(mod-trial-of-finality)` to your server's main `CMakeLists.txt` in the `modules` section.
     *   Re-run CMake and rebuild your server.
-3.  **Database Setup:**
+4.  **Database Setup:**
     *   This module uses AzerothCore's integrated SQL update system.
     *   Ensure the module is correctly placed in your `modules` directory and you have re-run CMake and rebuilt your server as per steps 1 & 2.
     *   Upon the next startup, the `worldserver` will automatically detect and apply the necessary SQL changes from the module's `data/sql/updates/applied/world/` directory.
