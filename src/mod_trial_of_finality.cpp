@@ -34,6 +34,7 @@
 #include "DBCStores.h"
 #include "CharTitles.h"
 #include "DatabaseEnv.h"
+#include "ObjectGuid.h" // Added for NPC caching
 #include "GridNotifiers.h" // For CreatureListSearcher in 15b
 
 
@@ -158,6 +159,7 @@ int CheeringNpcsMaxPerPlayerCluster = 5;
 int CheeringNpcsMaxTotalWorld = 50;
 uint32 CheeringNpcsTargetNpcFlags = UNIT_NPC_FLAG_NONE;
 uint32 CheeringNpcsExcludeNpcFlags = UNIT_NPC_FLAG_VENDOR | UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_FLIGHTMASTER | UNIT_NPC_FLAG_REPAIRER | UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_BANKER | UNIT_NPC_FLAG_TABARDDESIGNER | UNIT_NPC_FLAG_STABLEMASTER | UNIT_NPC_FLAG_GUILDMASTER | UNIT_NPC_FLAG_BATTLEMASTER | UNIT_NPC_FLAG_INNKEEPER | UNIT_NPC_FLAG_SPIRITHEALER | UNIT_NPC_FLAG_SPIRITGUIDE | UNIT_NPC_FLAG_PETITIONER;
+uint32 CheeringNpcsCheerIntervalMs = 2000; // Interval for the second cheer
 
 // --- Main Trial Logic ---
 struct ActiveTrialInfo { /* ... as of Step 11d ... */
@@ -376,45 +378,77 @@ bool TrialManager::StartTestTrial(Player* gmPlayer) { /* ... existing ... */ }
 bool TrialManager::ValidateGroupForTrial(Player* leader, Creature* trialNpc) { /* ... existing ... */ }
 
 void TrialManager::TriggerCityNpcCheers(uint32 /*successfulGroupId*/) {
-    if (!CheeringNpcsEnable || CheeringNpcCityZoneIDs.empty()) {
+    if (!CheeringNpcsEnable || CheeringNpcCityZoneIDs.empty() || ModServerScript::s_cheeringNpcCacheByZone.empty()) {
+        sLog->outDetail("[TrialOfFinality] NPC cheering skipped (disabled, no zones, or empty cache).");
         return;
     }
-    sLog->outDetail("[TrialOfFinality] Attempting to trigger city NPC cheers.");
+
+    sLog->outDetail("[TrialOfFinality] Attempting to trigger city NPC cheers using cached NPCs.");
     std::set<ObjectGuid> alreadyCheeringNpcs;
     int totalCheeredThisEvent = 0;
+
     Map::PlayerList const& players = sWorld->GetAllPlayers();
-    if (players.isEmpty()) return;
+    if (players.isEmpty()) {
+        sLog->outDetail("[TrialOfFinality] No players online to trigger cheers for.");
+        return;
+    }
+
     for (auto const& itr : players) {
+        if (totalCheeredThisEvent >= CheeringNpcsMaxTotalWorld) {
+            sLog->outDetail("[TrialOfFinality] Reached max total world cheers (%d). Stopping.", CheeringNpcsMaxTotalWorld);
+            break;
+        }
+
         Player* player = itr.GetSource();
-        if (!player || !player->GetSession() || !player->IsInWorld() || !player->GetMap()) { continue; }
-        if (totalCheeredThisEvent >= CheeringNpcsMaxTotalWorld) { break; }
-        if (CheeringNpcCityZoneIDs.count(player->GetZoneId())) {
-            std::list<Creature*> nearbyCreatures;
-            CellCoord cell(player->GetPosition());
-            Cell cellObj = Cell(cell);
-            Trinity::DefaultGridTypechecker<Creature> checker;
-            Trinity::CreatureListSearcher<Trinity::DefaultGridTypechecker<Creature>> searcher(player, nearbyCreatures, CheeringNpcsRadiusAroundPlayer, checker);
-            player->VisitNearbyGridObject(searcher, CheeringNpcsRadiusAroundPlayer);
+        if (!player || !player->GetSession() || !player->IsInWorld() || !player->GetMap()) {
+            continue;
+        }
+
+        uint32 currentZoneId = player->GetZoneId();
+        if (CheeringNpcCityZoneIDs.count(currentZoneId)) {
+            auto cacheIt = ModServerScript::s_cheeringNpcCacheByZone.find(currentZoneId);
+            if (cacheIt == ModServerScript::s_cheeringNpcCacheByZone.end() || cacheIt->second.empty()) {
+                // No NPCs cached for this specific zone, though the zone itself is a cheer zone.
+                continue;
+            }
+
+            const std::vector<ObjectGuid>& zoneNpcGuids = cacheIt->second;
             int cheeredThisCluster = 0;
-            for (Creature* creature : nearbyCreatures) {
-                if (totalCheeredThisEvent >= CheeringNpcsMaxTotalWorld || cheeredThisCluster >= CheeringNpcsMaxPerPlayerCluster) { break; }
-                if (alreadyCheeringNpcs.count(creature->GetGUID())) { continue; }
-                if (creature->IsAlive() && !creature->IsInCombat() && creature->GetTypeId() == TYPEID_UNIT && !creature->ToPlayer()) {
-                    uint32 npcFlags = creature->GetNpcFlags();
-                    bool isTargetType = (CheeringNpcsTargetNpcFlags == UNIT_NPC_FLAG_NONE) || (npcFlags & CheeringNpcsTargetNpcFlags);
-                    bool isExcludedType = (CheeringNpcsExcludeNpcFlags != 0) && (npcFlags & CheeringNpcsExcludeNpcFlags);
-                    if (isTargetType && !isExcludedType) {
-                        creature->HandleEmoteCommand(EMOTE_ONESHOT_CHEER);
-                        alreadyCheeringNpcs.insert(creature->GetGUID());
-                        cheeredThisCluster++;
-                        totalCheeredThisEvent++;
+
+            for (const ObjectGuid& npcGuid : zoneNpcGuids) {
+                if (totalCheeredThisEvent >= CheeringNpcsMaxTotalWorld) break;
+                if (cheeredThisCluster >= CheeringNpcsMaxPerPlayerCluster) {
+                    sLog->outDetail("[TrialOfFinality] Reached max cheers for player %s's cluster (%d).", player->GetName().c_str(), CheeringNpcsMaxPerPlayerCluster);
+                    break;
+                }
+                if (alreadyCheeringNpcs.count(npcGuid)) {
+                    continue;
+                }
+
+                Creature* creature = ObjectAccessor::GetCreatureOrPetOrVehicle(*player, npcGuid);
+                if (creature && creature->IsAlive() && !creature->IsInCombat() && player->IsWithinDistInMap(creature, CheeringNpcsRadiusAroundPlayer)) {
+                    // NpcFlag checks were done at caching time, so not strictly needed here
+                    // but could be added if dynamic flags are a concern.
+                    creature->HandleEmoteCommand(EMOTE_ONESHOT_CHEER); // First cheer
+
+                    if (CheeringNpcsCheerIntervalMs > 0) {
+                        sLog->outDetail("[TrialOfFinality] NPC %s (GUID %u) would perform a second cheer after %u ms.",
+                                        creature->GetName().c_str(), creature->GetGUID().GetCounter(), CheeringNpcsCheerIntervalMs);
                     }
+
+                    alreadyCheeringNpcs.insert(npcGuid);
+                    cheeredThisCluster++;
+                    totalCheeredThisEvent++;
+                    // sLog->outDebug("[TrialOfFinality] NPC %s (GUID %u) cheered for player %s.", creature->GetName().c_str(), npcGuid.GetCounter(), player->GetName().c_str());
                 }
             }
         }
     }
-    sLog->outMessage("sys", "[TrialOfFinality] Triggered %d city NPCs to cheer.", totalCheeredThisEvent);
-    LogTrialDbEvent(TRIAL_EVENT_NPC_CHEER_TRIGGERED, 0, nullptr, 0, 0, "Total NPCs cheered: " + std::to_string(totalCheeredThisEvent));
+
+    sLog->outMessage("sys", "[TrialOfFinality] Triggered %d city NPCs to cheer using cache.", totalCheeredThisEvent);
+    if (totalCheeredThisEvent > 0) { // Only log DB event if someone actually cheered
+        LogTrialDbEvent(TRIAL_EVENT_NPC_CHEER_TRIGGERED, 0, nullptr, 0, 0, "Total NPCs cheered (cached): " + std::to_string(totalCheeredThisEvent));
+    }
 }
 
 
@@ -431,6 +465,8 @@ class ModServerScript : public ServerScript
 {
 public:
     ModServerScript() : ServerScript("ModTrialOfFinalityServerScript") {}
+
+    static std::map<uint32, std::vector<ObjectGuid>> s_cheeringNpcCacheByZone; // Keep this one
     void OnConfigLoad(bool reload) override
     {
         sLog->outMessage("sys", "Loading Trial of Finality module configuration...");
@@ -464,6 +500,7 @@ public:
         CheeringNpcsMaxTotalWorld = sConfigMgr->GetOption<int>("TrialOfFinality.CheeringNpcs.MaxTotalNpcsToCheerWorld", 50);
         CheeringNpcsTargetNpcFlags = sConfigMgr->GetOption<uint32>("TrialOfFinality.CheeringNpcs.TargetNpcFlags", UNIT_NPC_FLAG_NONE);
         CheeringNpcsExcludeNpcFlags = sConfigMgr->GetOption<uint32>("TrialOfFinality.CheeringNpcs.ExcludeNpcFlags", UNIT_NPC_FLAG_VENDOR | UNIT_NPC_FLAG_TRAINER | UNIT_NPC_FLAG_FLIGHTMASTER | UNIT_NPC_FLAG_REPAIRER | UNIT_NPC_FLAG_AUCTIONEER | UNIT_NPC_FLAG_BANKER | UNIT_NPC_FLAG_TABARDDESIGNER | UNIT_NPC_FLAG_STABLEMASTER | UNIT_NPC_FLAG_GUILDMASTER | UNIT_NPC_FLAG_BATTLEMASTER | UNIT_NPC_FLAG_INNKEEPER | UNIT_NPC_FLAG_SPIRITHEALER | UNIT_NPC_FLAG_SPIRITGUIDE | UNIT_NPC_FLAG_PETITIONER);
+        CheeringNpcsCheerIntervalMs = sConfigMgr->GetOption<uint32>("TrialOfFinality.CheeringNpcs.CheerIntervalMs", 2000);
 
         CheeringNpcCityZoneIDs.clear();
         std::stringstream ss(zoneIDsStr);
@@ -476,6 +513,69 @@ public:
         }
         sLog->outDetail("[TrialOfFinality] Loaded %lu City Zone IDs for NPC cheering.", CheeringNpcCityZoneIDs.size());
 
+        // NPC Caching Logic
+        s_cheeringNpcCacheByZone.clear();
+        if (CheeringNpcsEnable && !CheeringNpcCityZoneIDs.empty())
+        {
+            sLog->outMessage("sys", "[TrialOfFinality] Caching cheering NPCs...");
+            std::string zoneIdString;
+            for (uint32 zoneId : CheeringNpcCityZoneIDs)
+            {
+                if (!zoneIdString.empty())
+                    zoneIdString += ",";
+                zoneIdString += std::to_string(zoneId);
+            }
+
+            std::ostringstream query;
+            query << "SELECT guid, zoneId FROM creature WHERE zoneId IN (" << zoneIdString << ") AND playercreateinfo_guid = 0";
+
+            if (CheeringNpcsTargetNpcFlags != UNIT_NPC_FLAG_NONE)
+            {
+                query << " AND (npcflag & " << CheeringNpcsTargetNpcFlags << ") != 0";
+            }
+            else
+            {
+                query << " AND npcflag = 0";
+            }
+
+            if (CheeringNpcsExcludeNpcFlags != 0)
+            {
+                query << " AND (npcflag & " << CheeringNpcsExcludeNpcFlags << ") = 0";
+            }
+
+            QueryResult result = WorldDatabase.Query(query.str().c_str());
+            if (result)
+            {
+                uint32 count = 0;
+                do
+                {
+                    Field* fields = result->Fetch();
+                    uint32 guidLow = fields[0].Get<uint32>();
+                    uint32 zoneId = fields[1].Get<uint32>();
+                    s_cheeringNpcCacheByZone[zoneId].push_back(ObjectGuid(HighGuid::Creature, 0, guidLow));
+                    count++;
+                } while (result->NextRow());
+                sLog->outMessage("sys", "[TrialOfFinality] Cached %u cheering NPCs in %lu zones.", count, s_cheeringNpcCacheByZone.size());
+                for (const auto& pair : s_cheeringNpcCacheByZone)
+                {
+                    sLog->outDetail("[TrialOfFinality] Zone %u: Cached %lu NPCs.", pair.first, pair.second.size());
+                }
+            }
+            else
+            {
+                sLog->outMessage("sys", "[TrialOfFinality] No cheering NPCs found to cache or database error.");
+            }
+        }
+        else if (!CheeringNpcsEnable)
+        {
+            sLog->outMessage("sys", "[TrialOfFinality] Cheering NPCs disabled, cache not populated.");
+        }
+        else if (CheeringNpcCityZoneIDs.empty())
+        {
+            sLog->outMessage("sys", "[TrialOfFinality] No City Zone IDs configured for cheering NPCs, cache not populated.");
+        }
+
+
         if (!FateweaverArithosEntry || !TrialTokenEntry || !AnnouncerEntry || !TitleRewardID) {
             sLog->outError("sys", "Trial of Finality: Critical EntryID (NPC, Item, Title) not configured. Disabling module functionality.");
             ModuleEnabled = false; return;
@@ -484,6 +584,10 @@ public:
         if (reload) { sLog->outMessage("sys", "Trial of Finality: Configuration reloaded. Consider restarting for full effect if scripts were already registered."); }
     }
 };
+
+namespace ModTrialOfFinality {
+    std::map<uint32, std::vector<ObjectGuid>> ModServerScript::s_cheeringNpcCacheByZone;
+} // end namespace ModTrialOfFinality
 
 // --- GM Command Scripts ---
 class trial_commandscript : public CommandScript { /* ... existing ... */ };
