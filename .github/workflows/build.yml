@@ -1,29 +1,56 @@
-# Define the module name
-set(MODULE_NAME mod_trial_of_finality)
+name: Build AzerothCore Fork + Playerbots + mod_trial_of_finality
 
-# Specify the source files
-set(MODULE_SOURCES
-    src/YourSourceFile.cpp
-    # Add other source files as needed
-)
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
-# Include directories
-include_directories(
-    ${CMAKE_SOURCE_DIR}/src
-    ${CMAKE_SOURCE_DIR}/modules
-    # Add other directories as needed
-)
+jobs:
+  build:
+    runs-on: ubuntu-latest
 
-# Define the module as a shared library
-add_library(${MODULE_NAME} MODULE ${MODULE_SOURCES})
+    steps:
+      # Checkout your mod repo into a subfolder to avoid copy conflicts
+      - name: Checkout mod_trial_of_finality
+        uses: actions/checkout@v3
+        with:
+          path: mod-src
 
-# Link against necessary libraries
-target_link_libraries(${MODULE_NAME}
-    AzerothCore
-    # Add other libraries as needed
-)
+      # Install system dependencies for building AzerothCore
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client
 
-# Set the output directory for the module
-set_target_properties(${MODULE_NAME} PROPERTIES
-    LIBRARY_OUTPUT_DIRECTORY ${CMAKE_SOURCE_DIR}/modules/${MODULE_NAME}/
-)
+      # Clone your AzerothCore fork on the Playerbot branch
+      - name: Clone AzerothCore (Playerbot branch)
+        run: |
+          git clone --branch=Playerbot --depth=1 https://github.com/liyunfan1223/azerothcore-wotlk.git azerothcore
+          mkdir -p azerothcore/modules
+
+      # Clone mod-playerbots if not already included in your fork
+      - name: Clone mod-playerbots (if needed)
+        run: |
+          if [ ! -d "azerothcore/modules/mod-playerbots" ]; then
+            git clone --depth=1 https://github.com/azerothcore/mod-playerbots.git azerothcore/modules/mod-playerbots
+          fi
+
+      # Copy your mod into the AzerothCore modules directory
+      - name: Copy mod_trial_of_finality into AzerothCore
+        run: |
+          mkdir -p azerothcore/modules/mod_trial_of_finality
+          cp -r mod-src/* azerothcore/modules/mod_trial_of_finality
+
+      # Build AzerothCore and your module
+      - name: Build AzerothCore + modules
+        run: |
+          cd azerothcore
+          mkdir build && cd build
+          cmake ../ -DCMAKE_INSTALL_PREFIX=../bin
+          make -j$(nproc)
+
+      # Verify that the build succeeded by checking for the worldserver binary
+      - name: Confirm worldserver built
+        run: |
+          test -f azerothcore/bin/bin/worldserver && echo "✅ Build succeeded." || (echo "❌ Build failed!" && exit 1)
