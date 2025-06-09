@@ -21,8 +21,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client
-
+          sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client \
+          libboost-all-dev
       # Clone your AzerothCore fork on the Playerbot branch
       - name: Clone AzerothCore (Playerbot branch)
         run: |
