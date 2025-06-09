@@ -44,7 +44,7 @@
 
 ## 4. Essential Configuration (`mod_trial_of_finality.conf`)
 
-The module is configured via `mod_trial_of_finality.conf`. Below are the most common settings for basic setup and gameplay adjustments. For a complete list of all options and advanced technical details, please see the [Developer Guide](docs/DEVELOPER_GUIDE.md).
+The module is configured via `mod_trial_of_finality.conf`. Below are the most common settings for basic setup and gameplay adjustments. For a complete list of all options and advanced technical details, please see the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md).
 
 *   **Core Setup:**
     *   `TrialOfFinality.Enable`: `true` or `false` to enable/disable the module.
@@ -59,10 +59,10 @@ The module is configured via `mod_trial_of_finality.conf`. Below are the most co
 *   **Arena Location:**
     *   `TrialOfFinality.Arena.MapID`, `TrialOfFinality.Arena.TeleportX/Y/Z/O`: Define the trial arena map and teleport coordinates. Adjust these to your desired arena location.
 *   **NPC Customization (Crucial for Admins):**
-    *   `TrialOfFinality.NpcPools.Easy`, `TrialOfFinality.NpcPools.Medium`, `TrialOfFinality.NpcPools.Hard`: Comma-separated lists of creature entry IDs for trial waves. **Crucial: Customize these with valid creature IDs from your database.** Example: `"123,456,789"`. See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for more details on NPC scaling and pool configuration.
+    *   `TrialOfFinality.NpcPools.Easy`, `TrialOfFinality.NpcPools.Medium`, `TrialOfFinality.NpcPools.Hard`: Comma-separated lists of creature entry IDs for trial waves. **Crucial: Customize these with valid creature IDs from your database.** Example: `"123,456,789"`. See the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md) for more details on NPC scaling and pool configuration.
 *   **Perma-Death Options:**
     *   `TrialOfFinality.PermaDeath.ExemptGMs`: If `true` (default), Game Master accounts are not permanently affected by trial failure.
-    *   *Note:* Perma-death status is stored in the `character_trial_finality_status` database table. The old `DisableCharacter.Method` config option and direct reliance on `AURA_ID_TRIAL_PERMADEATH` (40000) are now primarily historical/secondary. See the [Developer Guide](docs/DEVELOPER_GUIDE.md) for full details.
+    *   *Note:* Perma-death status is stored in the `character_trial_finality_status` database table. The old `DisableCharacter.Method` config option and direct reliance on `AURA_ID_TRIAL_PERMADEATH` (40000) are now primarily historical/secondary. See the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md) for full details.
 *   **Trial Confirmation:**
     *   `TrialOfFinality.Confirmation.Enable`: Enable/disable the trial start confirmation (default: true). If enabled, members must type `/trialconfirm yes`.
     *   `TrialOfFinality.Confirmation.TimeoutSeconds`: How long members have to confirm (default: 60s).
@@ -71,8 +71,8 @@ The module is configured via `mod_trial_of_finality.conf`. Below are the most co
     *   `TrialOfFinality.AnnounceWinners.World.Enable`: `true` or `false` to enable/disable server-wide announcements for trial winners. (See Dev Guide for message format).
     *   `TrialOfFinality.CheeringNpcs.Enable`: `true` or `false` to enable/disable NPCs cheering in cities for winners. (See Dev Guide for detailed sub-options like ZoneIDs, flags, radius, interval, and second cheer status).
 
-For detailed explanations of all configuration options, including NPC flags, specific default values, and advanced settings, refer to the [Developer Guide](docs/DEVELOPER_GUIDE.md).
-For guidance on testing all features of this module, see the [Testing Guide](docs/testing_guide.md).
+For detailed explanations of all configuration options, including NPC flags, specific default values, and advanced settings, refer to the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md).
+For guidance on testing all features of this module, see the [Testing Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/testing_guide.md).
 
 ## 5. Gameplay Mechanics
 
@@ -134,8 +134,8 @@ Access to commands requires `SEC_GAMEMASTER` level.
 
 ## 7. Logging
 
-Key trial events are logged to the `trial_of_finality_log` database table and also to the server console (`sLog`). For details on event types and log structure, please see the [Developer Guide](docs/DEVELOPER_GUIDE.md).
+Key trial events are logged to the `trial_of_finality_log` database table and also to the server console (`sLog`). For details on event types and log structure, please see the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md).
 
 ## 8. Advanced Information & Development
 
-For detailed technical information about all configuration options, internal systems, database schema, contribution guidelines, or future development notes, please refer to the [Developer Guide](docs/DEVELOPER_GUIDE.md).
+For detailed technical information about all configuration options, internal systems, database schema, contribution guidelines, or future development notes, please refer to the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md).
