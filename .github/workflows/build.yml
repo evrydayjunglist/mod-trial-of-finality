@@ -34,7 +34,9 @@ jobs:
 
       - name: Copy your mod into AzerothCore modules
         run: |
-          cp -r mod-src azerothcore/modules/mod_trial_of_finality
+          mkdir -p azerothcore/modules/mod_trial_of_finality
+          cp -r mod-src/* azerothcore/modules/mod_trial_of_finality
+
 
       - name: Build AzerothCore + mods
         run: |
