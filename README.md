@@ -38,7 +38,8 @@
         4.  `npc_fateweaver_arithos_spawn.sql` (Spawns Fateweaver Arithos)
         5.  `npc_trial_announcer_template.sql` (Creature template for the Trial Announcer NPC)
         6.  `log_table_trial_of_finality.sql` (Creates the database table for logging trial events)
-        7.  *(Optional)* SQL files for wave creature templates if you used custom entries (e.g., 70001-70030 from the default pools) and they don't exist in your DB.
+        7.  `character_trial_finality_status.sql` (Creates the table to store perma-death status; run after `log_table_trial_of_finality.sql`)
+        8.  *(Optional)* SQL files for wave creature templates if you used custom entries (e.g., 70001-70030 from the default pools) and they don't exist in your DB.
 
 ## 4. Setup & Configuration
 
@@ -56,7 +57,7 @@ Key configuration options (see the `.conf` file for default values and comments)
 *   `TrialOfFinality.MaxLevelDifference`: Maximum level difference allowed between group members.
 *   `TrialOfFinality.Arena.MapID`, `TrialOfFinality.Arena.TeleportX/Y/Z/O`: Coordinates for the trial arena.
 *   `TrialOfFinality.NpcScaling.Mode`: (Currently "match_highest_level", future expansion possible).
-*   `TrialOfFinality.DisableCharacter.Method`: (Currently "custom_flag" via Aura ID `40000`. Future DB flag possible).
+*   `TrialOfFinality.DisableCharacter.Method`: This option is now effectively superseded by the database-driven perma-death flag system in the `character_trial_finality_status` table. The "custom_flag" historically referred to `AURA_ID_TRIAL_PERMADEATH` (40000), which is no longer the primary mechanism for persistent perma-death.
 *   `TrialOfFinality.GMDebug.Enable`: (Not currently used to gate GM commands, they are available if module is enabled).
 *   `TrialOfFinality.AnnounceWinners.World.Enable`: (true/false) Enables or disables world announcements upon successful trial completion. Default: `true`.
 *   `TrialOfFinality.AnnounceWinners.World.MessageFormat`: String format for the world announcement. Placeholders: `{group_leader}`, `{player_list}`.
@@ -74,7 +75,7 @@ These settings control the behavior of NPCs cheering in cities when a trial is s
 *   `TrialOfFinality.CheeringNpcs.ExcludeNpcFlags`: Uint32 value. NPCs with any of these flags will be excluded from cheering, even if they match `TargetNpcFlags`. This is useful for preventing guards, vendors, trainers, etc., from cheering. Default: (flags for common utility NPCs, see conf file).
 *   `TrialOfFinality.CheeringNpcs.CheerIntervalMs`: Uint32 value. The intended interval in milliseconds for a second cheer from the same NPC. A value of `0` disables the second cheer. *Note: Currently, the execution of this second cheer is logged, and its full implementation depends on future enhancements to timer mechanisms.* Default: `2000`.
 
-Placeholder Aura ID for Perma-Death: `AURA_ID_TRIAL_PERMADEATH = 40000`. Ensure this aura ID is a passive, persistent aura in your DBCs, or change it to one that is.
+The `AURA_ID_TRIAL_PERMADEATH` (constant `40000` in C++) is no longer the primary mechanism for persistent perma-death. It might be used for immediate in-session effects or visual cues if necessary, but the authoritative source for a character's perma-death status is the `character_trial_finality_status` database table.
 
 ### Placeholder Creature ID Pools for Waves
 The module now spawns distinct, randomly selected NPCs for each wave from predefined pools. You **must** ensure the creature IDs listed in these pools in `src/mod_trial_of_finality.cpp` correspond to actual creature templates in your database, or update the pools with valid IDs. Each pool should ideally contain at least 5-10 distinct creature IDs appropriate for the difficulty tier.
@@ -97,7 +98,7 @@ Default placeholder pools in `src/mod_trial_of_finality.cpp` are:
     *   Level difference between highest and lowest member must be `<= MaxLevelDifference`.
     *   No playerbots in the group.
     *   No member may already possess a Trial Token.
-    *   No member may be currently marked by the perma-death flag (`AURA_ID_TRIAL_PERMADEATH`).
+    *   No member may be currently marked as perma-failed in the `character_trial_finality_status` table (and by extension, should not have the old `AURA_ID_TRIAL_PERMADEATH` if cleanup was successful).
 
 ### 5.2. During the Trial
 *   Upon starting, all group members receive a **Trial Token**, have XP gain disabled, and are teleported to the arena.
@@ -110,11 +111,12 @@ Default placeholder pools in `src/mod_trial_of_finality.cpp` are:
 *   If a player dies while holding the Trial Token, they enter a "downed" state for the current wave. They become a ghost.
 *   **Resurrection:** Downed players can be resurrected by any combat-capable resurrection spell or item cast by a teammate *before the current wave ends*. A successful resurrection removes them from the "downed" state, and they avoid perma-death for that specific death event.
 *   **Perma-Death:** If a wave ends and a player is still in the "downed" state (i.e., died and was not resurrected), they are permanently affected:
-    *   The `AURA_ID_TRIAL_PERMADEATH` (placeholder `40000`) is applied.
-    *   They are marked as `permanentlyFailed` for the remainder of this trial instance.
+    *   A flag (`is_perma_failed = 1`) is set in the `character_trial_finality_status` database table for their character, along with a timestamp. This is the authoritative mark of perma-death.
+    *   The old `AURA_ID_TRIAL_PERMADEATH` (constant `40000`) is removed if present, as the DB flag supersedes it for persistence.
+    *   They are marked as `permanentlyFailed` for the remainder of this trial instance (internal tracking).
     *   The trial *continues* for any remaining active players. Future waves will scale to the new group size.
-    *   Players with `AURA_ID_TRIAL_PERMADEATH` will be kicked from the game upon their next login and will be unable to log into that character again (unless a GM intervenes).
-*   **Group Wipe:** If all currently active players in the trial are downed simultaneously (or disconnect), the trial ends in failure. All players who were "downed" at that point will be perma-deathed.
+    *   Players whose characters have the `is_perma_failed = 1` flag in the database will be kicked from the game upon their next login and will be unable to log into that character again (unless a GM intervenes).
+*   **Group Wipe:** If all currently active players in the trial are downed simultaneously (or disconnect), the trial ends in failure. All players who were "downed" at that point will have the perma-death flag set in the database.
 
 ### 5.4. Trial Success
 *   Successfully defeating all 5 waves while at least one original member remains active (not perma-deathed) results in trial success.
@@ -135,10 +137,9 @@ Default placeholder pools in `src/mod_trial_of_finality.cpp` are:
 Access to commands requires `SEC_GAMEMASTER` level.
 
 *   **.trial reset <CharacterName>**
-    *   Resets the Trial of Finality status for the specified character.
-    *   Removes the Trial Token item from their inventory.
-    *   Removes the `AURA_ID_TRIAL_PERMADEATH` (perma-death flag) if present.
-    *   This allows a character to become playable again if they were perma-deathed.
+    *   Resets the Trial of Finality perma-death status for the specified character by setting `is_perma_failed = 0` in the `character_trial_finality_status` table.
+    *   It also removes the Trial Token item from their inventory (if online) and attempts to clean up the old `AURA_ID_TRIAL_PERMADEATH` (if online and present).
+    *   This allows a character to become playable again if they were previously perma-deathed and kicked on login.
 
 *   **.trial test start**
     *   Allows a GM to start a solo test version of the Trial of Finality for themselves.
@@ -151,7 +152,7 @@ Access to commands requires `SEC_GAMEMASTER` level.
 *   These events are also logged to the server console (`sLog`) with the prefix `[TrialEventSLOG]`.
 
 ## 8. Developer Notes & Future Considerations
-*   The perma-death mechanism currently uses a placeholder Aura ID (`40000`). This should be verified or changed to a suitable passive, persistent aura in your DBC setup. A database flag in a custom table would be a more robust alternative for future development.
+*   The perma-death mechanism now uses a database flag in the `character_trial_finality_status` table for persistence. This replaces the previous system that relied solely on `AURA_ID_TRIAL_PERMADEATH` (constant `40000`) for long-term status. The aura might still be used for immediate in-session effects or as a visual cue but is cleaned up/secondary to the DB flag.
 *   Creature entries for waves (`70001`-`70030`) are placeholders. Update these in `src/mod_trial_of_finality.cpp` or create these custom NPCs.
 *   Wave difficulty scaling currently adjusts NPC count and provides a basic health multiplier for later waves. More complex stat scaling or varied NPC abilities per wave could be added.
 *   Consider randomizing NPC types for waves from predefined lists to enhance replayability.
