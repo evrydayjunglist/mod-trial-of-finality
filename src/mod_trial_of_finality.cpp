@@ -318,16 +318,33 @@ void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, con
                 if (trialInfo->permanentlyFailedPlayerGuids.count(playerGuid)) { continue; }
                 Player* downedPlayer_obj = ObjectAccessor::FindPlayer(playerGuid);
                 if (downedPlayer_obj && downedPlayer_obj->GetSession()) {
-                    if (!downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) { downedPlayer_obj->AddAura(AURA_ID_TRIAL_PERMADEATH, downedPlayer_obj); }
-                    trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid);
-                    LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer_obj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Perma-death due to trial failure: " + reason);
-                    sLog->outCritical("[TrialOfFinality] Player %s (GUID %s, Group %u) PERMANENTLY FAILED due to trial failure: %s (Wave %d).",
+                    // Apply DB flag for online player
+                    CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
+                        downedPlayer_obj->GetGUID().GetCounter());
+
+                    trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid); // Keep tracking for current trial instance logic
+
+                    std::string safe_reason = reason;
+                    CharacterDatabase.EscapeString(safe_reason);
+
+                    LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer_obj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Perma-death DB flag set: " + safe_reason);
+                    sLog->outCritical("[TrialOfFinality] Player %s (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).",
                         downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
                     ChatHandler(downedPlayer_obj->GetSession()).SendSysMessage("The trial has ended in failure. Your fate is sealed.");
-                } else {
-                    trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid);
-                    LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player GUID " + playerGuid.ToString() + " (offline) - Perma-death due to trial failure: " + reason);
-                    sLog->outCritical("[TrialOfFinality] Offline Player (GUID %s, Group %u) PERMANENTLY FAILED due to trial failure: %s (Wave %d).", playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
+                    // Remove aura if it was applied, as DB is now the master record
+                    if (downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) downedPlayer_obj->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
+
+                } else { // Player is offline
+                    CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
+                        playerGuid.GetCounter());
+
+                    trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid); // Keep tracking for current trial instance logic
+
+                    std::string safe_reason_offline = reason;
+                    CharacterDatabase.EscapeString(safe_reason_offline);
+
+                    LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player GUID " + playerGuid.ToString() + " (offline) - Perma-death DB flag set: " + safe_reason_offline);
+                    sLog->outCritical("[TrialOfFinality] Offline Player (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).", playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
                 }
             }
         }
@@ -459,7 +476,43 @@ class npc_trial_announcer : public CreatureScript { /* ... */ };
 enum FateweaverArithosGossipActions { /* ... */ };
 class npc_fateweaver_arithos : public CreatureScript { /* ... */ };
 // --- Player and World Event Scripts ---
-class ModPlayerScript : public PlayerScript { /* ... */ };
+class ModPlayerScript : public PlayerScript
+{
+public:
+    ModPlayerScript() : PlayerScript("ModTrialOfFinalityPlayerScript") {}
+
+    void OnLogin(Player* player) override {
+        if (!ModuleEnabled) return;
+
+        // Remove stray trial tokens if player logs in and is not in an active trial context
+        if (player->HasItemCount(TrialTokenEntry, 1, true)) {
+            if (player->GetMapId() != ArenaMapID) { // Simple check: if not in arena map
+                player->DestroyItemCount(TrialTokenEntry, 1, true, false);
+                sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) logged in outside arena with Trial Token; token removed.",
+                    player->GetName().c_str(), player->GetGUID().GetCounter());
+                LogTrialDbEvent(TRIAL_EVENT_STRAY_TOKEN_REMOVED, 0, player, 0, player->getLevel(), "Logged in outside arena with token.");
+            }
+        }
+
+        // Check for perma-death flag on login using the database
+        if (player && player->GetSession()) {
+            QueryResult result = CharacterDatabase.QueryFmt("SELECT is_perma_failed FROM character_trial_finality_status WHERE guid = %u", player->GetGUID().GetCounter());
+            if (result)
+            {
+                Field* fields = result->Fetch();
+                if (fields[0].Get<bool>()) // is_perma_failed is true
+                {
+                    player->GetSession()->KickPlayer("Your fate was sealed in the Trial of Finality.");
+                    sLog->outWarn("sys", "[TrialOfFinality] Player %s (GUID %u, Account %u) kicked on login due to perma-death flag in DB.",
+                                 player->GetName().c_str(), player->GetGUID().GetCounter(), player->GetSession()->GetAccountId());
+                    if(player->HasAura(AURA_ID_TRIAL_PERMADEATH)) player->RemoveAura(AURA_ID_TRIAL_PERMADEATH); // Cleanup aura if it exists
+                    return;
+                }
+            }
+        }
+        // Old aura-based check is now removed/obsolete.
+    }
+};
 
 class ModServerScript : public ServerScript
 {
@@ -590,7 +643,108 @@ namespace ModTrialOfFinality {
 } // end namespace ModTrialOfFinality
 
 // --- GM Command Scripts ---
-class trial_commandscript : public CommandScript { /* ... existing ... */ };
+class trial_commandscript : public CommandScript
+{
+public:
+    trial_commandscript() : CommandScript("trial_commandscript") { }
+
+    std::vector<ChatCommand> GetCommands() const override
+    {
+        static std::vector<ChatCommand> trialCommandTable = {
+            { "reset", SEC_GAMEMASTER, true, &ChatCommand_trial_reset, "" },
+            { "test",  SEC_GAMEMASTER, true, &ChatCommand_trial_test,  "" }
+        };
+        static std::vector<ChatCommand> commandTable = {
+            { "trial", SEC_GAMEMASTER, true, nullptr, "", trialCommandTable }
+        };
+        return commandTable;
+    }
+
+    static bool ChatCommand_trial_reset(ChatHandler* handler, const char* args)
+    {
+        if (!ModuleEnabled) { handler->SendSysMessage("Trial of Finality module is disabled."); return false; }
+        if (!*args) { handler->SendSysMessage("Usage: .trial reset <CharacterName>"); return false; }
+
+        Player* targetPlayer = handler->getSelectedPlayer();
+        ObjectGuid playerGuid = ObjectGuid::Empty;
+        std::string charNameStr = strtok((char*)args, " ");
+        std::string charName = charNameStr;
+
+        if (targetPlayer && Acore::CaseInsensitiveCompare(targetPlayer->GetName(), charName)) {
+            playerGuid = targetPlayer->GetGUID();
+        } else {
+            targetPlayer = nullptr; // Not selected or name mismatch, try to find by name
+            playerGuid = sObjectAccessor->GetPlayerGUIDByName(charName);
+        }
+
+        if (playerGuid.IsEmpty()) {
+            handler->PSendSysMessage("Player %s not found.", charName.c_str());
+            return false;
+        }
+
+        // Re-fetch player object if it was null or mismatched, now that we have a GUID
+        if (!targetPlayer && playerGuid) {
+            targetPlayer = ObjectAccessor::FindPlayer(playerGuid);
+        }
+
+        // 1. Clear Perma-death DB flag
+        CharacterDatabase.ExecuteFmt("UPDATE character_trial_finality_status SET is_perma_failed = 0, last_failed_timestamp = NULL WHERE guid = %u", playerGuid.GetCounter());
+        handler->PSendSysMessage("Cleared Trial of Finality perma-death DB flag for character %s (GUID %u).", charName.c_str(), playerGuid.GetCounter());
+
+        std::string log_detail = "GM cleared perma-death DB flag for " + charName;
+        Player* loggerPlayer = targetPlayer ? targetPlayer : (handler->GetPlayer() ? handler->GetPlayer() : nullptr);
+        uint32 loggerGroupId = (loggerPlayer && loggerPlayer->GetGroup()) ? loggerPlayer->GetGroup()->GetId() : 0;
+        uint8 loggerLevel = loggerPlayer ? loggerPlayer->getLevel() : 0;
+
+        LogTrialDbEvent(TRIAL_EVENT_GM_COMMAND_RESET, loggerGroupId, loggerPlayer, 0, loggerLevel, log_detail);
+        sLog->outInfo("sys", "[TrialOfFinality] GM %s cleared perma-death DB flag for %s (GUID %u).",
+                     (handler->GetPlayer() ? handler->GetPlayer()->GetName().c_str() : "UnknownGM"), charName.c_str(), playerGuid.GetCounter());
+        if (targetPlayer && targetPlayer->GetSession()) {
+             ChatHandler(targetPlayer->GetSession()).SendSysMessage("Your Trial of Finality perma-death status (DB) has been reset by a GM.");
+        }
+
+        // 2. Remove Trial Token if player has it (only if online)
+        if (targetPlayer) {
+            if (targetPlayer->HasItemCount(TrialTokenEntry, 1, true)) {
+                targetPlayer->DestroyItemCount(TrialTokenEntry, 1, true, false);
+                if (targetPlayer->GetSession()) ChatHandler(targetPlayer->GetSession()).SendSysMessage("Your Trial Token has been removed by a GM.");
+                handler->PSendSysMessage("Removed Trial Token from %s.", charName.c_str());
+            }
+        } else {
+            handler->PSendSysMessage("Note: If %s is offline, their Trial Token (if any) was not removed by this command.", charName.c_str());
+        }
+
+        // 3. Remove Perma-Death Aura if player has it (cleanup, only if online)
+        if (targetPlayer) {
+            if (targetPlayer->HasAura(AURA_ID_TRIAL_PERMADEATH)) {
+                targetPlayer->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
+                if (targetPlayer->GetSession()) ChatHandler(targetPlayer->GetSession()).SendSysMessage("Your Trial of Finality perma-death aura (if present) has been removed by a GM.");
+                handler->PSendSysMessage("Removed Trial of Finality perma-death aura from %s as a cleanup.", charName.c_str());
+            }
+        } else {
+            handler->PSendSysMessage("Note: If %s is offline, their perma-death aura (if any) was not removed by this command.", charName.c_str());
+        }
+
+        handler->SendSysMessage("Trial of Finality status for " + charName + " has been reset.");
+        return true;
+    }
+
+    static bool ChatCommand_trial_test(ChatHandler* handler, const char* /*args*/)
+    {
+        if (!ModuleEnabled) { handler->SendSysMessage("Trial of Finality module is disabled."); return false; }
+        Player* gmPlayer = handler->GetPlayer();
+        if (!gmPlayer) { handler->SendSysMessage("You must be a player to use this command."); return false; }
+
+        if (TrialManager::instance()->StartTestTrial(gmPlayer)) {
+            handler->SendSysMessage("Test trial initiated successfully.");
+            LogTrialDbEvent(TRIAL_EVENT_GM_COMMAND_TEST_START, (gmPlayer->GetGroup() ? gmPlayer->GetGroup()->GetId() : 0), gmPlayer, 0, gmPlayer->getLevel(), "GM started test trial.");
+             sLog->outInfo("sys", "[TrialOfFinality] GM %s (GUID %u) started a test trial.", gmPlayer->GetName().c_str(), gmPlayer->GetGUID().GetCounter());
+        } else {
+            handler->SendSysMessage("Failed to initiate test trial. Check server logs for details.");
+        }
+        return true;
+    }
+};
 
 }
 
