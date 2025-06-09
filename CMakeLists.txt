@@ -5,7 +5,7 @@ set(MODULE_NAME "mod_trial_of_finality")
 
 # Define the source files
 set(MODULE_SOURCES
-    src/mod-trial-of-finality.cpp
+    src/mod_trial_of_finality.cpp
 )
 
 # Include AzerothCore directories
