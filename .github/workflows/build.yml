@@ -1,4 +1,4 @@
-name: Build AzerothCore with My Mod
+name: Build Custom AzerothCore Fork with My Mod
 
 on:
   push:
@@ -9,29 +9,38 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout mod repository
+      - name: Checkout your mod
         uses: actions/checkout@v3
 
       - name: Install dependencies
         run: |
-          sudo apt update
-          sudo apt install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client
+          sudo apt-get update
+          sudo apt-get install -y git cmake make gcc g++ libssl-dev libmysqlclient-dev mysql-client
 
-      - name: Clone AzerothCore
+      - name: Clone your AzerothCore fork (Playerbot branch)
         run: |
-          git clone --depth=1 https://github.com/azerothcore/azerothcore-wotlk.git azerothcore
-          mkdir azerothcore/modules
-          cp -r $GITHUB_WORKSPACE azerothcore/modules/my-mod
+          git clone --branch=Playerbot --depth=1 https://github.com/liyunfan1223/azerothcore-wotlk.git azerothcore
+          mkdir -p azerothcore/modules
 
-      - name: Build AzerothCore + mod
+      - name: Clone mod-playerbots (if not included)
+        run: |
+          if [ ! -d "azerothcore/modules/mod-playerbots" ]; then
+            git clone --depth=1 https://github.com/azerothcore/mod-playerbots.git azerothcore/modules/mod-playerbots
+          fi
+
+      - name: Copy your mod into AzerothCore
+        run: |
+          cp -r $GITHUB_WORKSPACE azerothcore/modules/mod_trial_of_finality
+
+      - name: Build AzerothCore + mods
         run: |
           cd azerothcore
-          mkdir build
-          cd build
+          mkdir build && cd build
           cmake ../ -DCMAKE_INSTALL_PREFIX=../bin
           make -j$(nproc)
 
-      - name: Check if worldserver binary exists
+      - name: Confirm worldserver build
         run: |
-          test -f azerothcore/bin/bin/worldserver && echo "Build successful" || (echo "Build failed" && exit 1)
+          test -f azerothcore/bin/bin/worldserver && echo "✅ Build succeeded." || (echo "❌ Build failed!" && exit 1)
