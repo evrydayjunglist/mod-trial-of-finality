@@ -1013,6 +1013,7 @@ bool TrialManager::StartTestTrial(Player* gmPlayer) {
     // Create a temporary, virtual group for the solo GM
     Group* tempGroup = new Group;
     tempGroup->Create(gmPlayer->GetGUID());
+    sGroupMgr->AddGroup(tempGroup); // Register group with the manager to prevent memory leak
     gmPlayer->SetGroup(tempGroup, GRP_STATUS_DEFAULT);
     uint32 tempGroupId = tempGroup->GetId();
 
