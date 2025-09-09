@@ -57,7 +57,10 @@ enum TrialEventType {
     TRIAL_EVENT_PLAYER_WARNED_ARENA_LEAVE,
     TRIAL_EVENT_PLAYER_FORFEIT_ARENA,
     TRIAL_EVENT_WORLD_ANNOUNCEMENT_SUCCESS,
-    TRIAL_EVENT_NPC_CHEER_TRIGGERED
+    TRIAL_EVENT_NPC_CHEER_TRIGGERED,
+    TRIAL_EVENT_FORFEIT_VOTE_START,
+    TRIAL_EVENT_FORFEIT_VOTE_CANCEL,
+    TRIAL_EVENT_FORFEIT_VOTE_SUCCESS
 };
 
 void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* player = nullptr,
@@ -117,9 +120,10 @@ void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* playe
 }
 
 // --- Creature ID Pools for Waves (Now loaded from config) ---
-std::vector<uint32> NpcPoolEasy;
-std::vector<uint32> NpcPoolMedium;
-std::vector<uint32> NpcPoolHard;
+// Each inner vector represents a "spawn choice", which can be a single creature or a pre-defined group.
+std::vector<std::vector<uint32>> NpcPoolEasy;
+std::vector<std::vector<uint32>> NpcPoolMedium;
+std::vector<std::vector<uint32>> NpcPoolHard;
 
 // --- Wave Spawn Positions ---
 const Position WAVE_SPAWN_POSITIONS[5] = {
@@ -163,6 +167,17 @@ bool PermaDeathExemptGMs = true; // Exempt GMs from perma-death
 uint32 ConfirmationTimeoutSeconds = 60; // Seconds for players to confirm trial participation
 bool ConfirmationEnable = true; // Enable/disable the confirmation system
 std::string ConfirmationRequiredMode = "all"; // "all", (future: "majority", "leader_plus_one")
+bool ForfeitEnable = true; // Enable/disable the forfeit feature
+
+// --- Custom NPC Scaling Settings ---
+struct CustomNpcScalingTier {
+    float HealthMultiplier = 1.0f;
+    std::vector<uint32> AurasToAdd;
+};
+CustomNpcScalingTier CustomScalingEasy;
+CustomNpcScalingTier CustomScalingMedium;
+CustomNpcScalingTier CustomScalingHard;
+
 
 // --- Main Trial Logic ---
 
@@ -199,6 +214,11 @@ struct ActiveTrialInfo {
     std::set<ObjectGuid> playersWarnedForLeavingArena;
     bool isTestTrial = false;
 
+    // Forfeit Vote
+    bool forfeitVoteInProgress = false;
+    time_t forfeitVoteStartTime = 0;
+    std::set<ObjectGuid> playersWhoVotedForfeit;
+
     ActiveTrialInfo() = default;
     ActiveTrialInfo(Group* group, uint8 highestLvl) :
         groupId(group->GetId()), leaderGuid(group->GetLeaderGUID()),
@@ -209,12 +229,18 @@ struct ActiveTrialInfo {
         permanentlyFailedPlayerGuids.clear();
         activeMonsters.clear();
         playersWarnedForLeavingArena.clear();
+        playersWhoVotedForfeit.clear();
         if (group) {
             for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
                 if (Player* member = itr->GetSource()) { memberGuids.insert(member->GetGUID()); }
             }
         }
     }
+};
+
+struct PendingSecondCheer {
+    ObjectGuid npcGuid;
+    time_t cheerTime;
 };
 
 class TrialManager
@@ -245,16 +271,19 @@ public:
     void StartConfirmedTrial(uint32 groupId);
     void AbortPendingTrial(uint32 groupId, const std::string& reason, Player* originator = nullptr);
     void OnUpdate(uint32 diff);
+    void HandleTrialForfeit(Player* player);
 
 private:
     time_t m_lastPendingCheck = 0; // To throttle pending check updates
     time_t m_lastBoundaryCheck = 0;
+    time_t m_lastCheerCheck = 0;
     TrialManager() {}
     ~TrialManager() {}
     TrialManager(const TrialManager&) = delete;
     TrialManager& operator=(const TrialManager&) = delete;
     std::map<uint32, ActiveTrialInfo> m_activeTrials;
     std::map<uint32 /*groupId*/, PendingTrialInfo> m_pendingTrials;
+    std::vector<PendingSecondCheer> m_pendingSecondCheers;
 };
 
 // --- TrialManager Method Implementations ---
@@ -344,6 +373,150 @@ void TrialManager::AbortPendingTrial(uint32 groupId, const std::string& reason, 
                  ChatHandler(member->GetSession()).PSendSysMessage("The Trial of Finality was aborted. Reason: %s", reason.c_str());
             }
         }
+    }
+
+    // --- Second Cheer Check ---
+    m_lastCheerCheck += diff;
+    if (m_lastCheerCheck >= 1000) { // Check every second
+        m_lastCheerCheck = 0;
+
+        if (!m_pendingSecondCheers.empty()) {
+            time_t now = time(nullptr);
+            auto it = m_pendingSecondCheers.begin();
+            while (it != m_pendingSecondCheers.end()) {
+                if (now >= it->cheerTime) {
+                    if (Creature* npc = ObjectAccessor::GetCreature(*sWorld, it->npcGuid)) {
+                        if (npc->IsAlive() && !npc->IsInCombat()) {
+                            npc->HandleEmoteCommand(EMOTE_ONESHOT_CHEER);
+                        }
+                    }
+                    it = m_pendingSecondCheers.erase(it);
+                } else {
+                    ++it;
+                }
+            }
+        }
+    }
+
+    // --- Forfeit Vote Timeout Check ---
+    // This check runs on every TrialManager update tick. A dedicated timer could also be used.
+    if (!m_activeTrials.empty()) {
+        time_t now = time(nullptr);
+        for (auto itr = m_activeTrials.begin(); itr != m_activeTrials.end(); ++itr) {
+            ActiveTrialInfo* trialInfo = &itr->second;
+            if (trialInfo->forfeitVoteInProgress && (now - trialInfo->forfeitVoteStartTime > 30)) {
+                trialInfo->forfeitVoteInProgress = false;
+                trialInfo->playersWhoVotedForfeit.clear();
+                std::string msg = "The vote to forfeit the trial has failed to pass in time and is now cancelled.";
+                LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, itr->first, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Vote timed out.");
+                for (const auto& memberGuid : trialInfo->memberGuids) {
+                     if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
+                        if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void TrialManager::HandleTrialForfeit(Player* player) {
+    if (!player || !player->GetGroup()) {
+        ChatHandler(player->GetSession()).SendSysMessage("You must be in a group to use this command.");
+        return;
+    }
+
+    uint32 groupId = player->GetGroup()->GetId();
+    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
+    if (!trialInfo) {
+        ChatHandler(player->GetSession()).SendSysMessage("Your group is not in an active Trial of Finality.");
+        return;
+    }
+
+    // Count active (online and alive) players to check for last-player-standing scenario
+    uint32 activePlayers = 0;
+    Player* lastPlayer = nullptr;
+    for (const auto& memberGuid : trialInfo->memberGuids) {
+        if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
+            if (Player* p = ObjectAccessor::FindPlayer(memberGuid)) {
+                if (p->GetSession() && p->IsAlive()) {
+                    activePlayers++;
+                    lastPlayer = p;
+                }
+            }
+        }
+    }
+
+    // If the person using the command is the last one left alive, they can forfeit instantly.
+    if (activePlayers == 1 && lastPlayer && lastPlayer->GetGUID() == player->GetGUID()) {
+        std::string reason = player->GetName() + " was the last survivor and has chosen to forfeit the trial.";
+        sLog->outInfo("sys", "[TrialOfFinality] Group %u trial forfeited by last survivor %s.", groupId, player->GetName().c_str());
+        LogTrialDbEvent(TRIAL_EVENT_PLAYER_FORFEIT_ARENA, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
+
+        for (const auto& memberGuid : trialInfo->memberGuids) {
+            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
+                if (member->GetSession()) {
+                     ChatHandler(member->GetSession()).SendSysMessage(reason);
+                }
+            }
+        }
+
+        // A forfeit does not trigger permadeath, it's a graceful exit.
+        CleanupTrial(groupId, false);
+        return;
+    }
+
+    // If we are here, it means there is more than one player, so a vote is required.
+    if (trialInfo->playersWhoVotedForfeit.count(player->GetGUID())) {
+        ChatHandler(player->GetSession()).SendSysMessage("You have already voted to forfeit.");
+        return;
+    }
+
+    // Re-check active players for voting threshold, as it might have changed.
+    uint32 votingThreshold = 0;
+    for (const auto& memberGuid : trialInfo->memberGuids) {
+        if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
+            Player* p = ObjectAccessor::FindPlayer(memberGuid);
+            if (p && p->GetSession() && p->IsAlive()) {
+                votingThreshold++;
+            }
+        }
+    }
+
+    if (votingThreshold <= 1) {
+        ChatHandler(player->GetSession()).SendSysMessage("There are not enough active players to hold a vote.");
+        return;
+    }
+
+    if (!trialInfo->forfeitVoteInProgress) {
+        trialInfo->forfeitVoteInProgress = true;
+        trialInfo->forfeitVoteStartTime = time(nullptr);
+        trialInfo->playersWhoVotedForfeit.insert(player->GetGUID());
+
+        std::string msg = player->GetName() + " has initiated a vote to forfeit the Trial of Finality! All other active members must type `/trialforfeit` within 30 seconds to agree. (1/" + std::to_string(votingThreshold) + " votes)";
+        LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_START, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Forfeit vote started.");
+
+        for (const auto& memberGuid : trialInfo->memberGuids) {
+            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
+                if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
+            }
+        }
+    } else {
+        trialInfo->playersWhoVotedForfeit.insert(player->GetGUID());
+        std::string msg = player->GetName() + " has also voted to forfeit. (" + std::to_string(trialInfo->playersWhoVotedForfeit.size()) + "/" + std::to_string(votingThreshold) + " votes)";
+
+        for (const auto& memberGuid : trialInfo->memberGuids) {
+            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
+                if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
+            }
+        }
+    }
+
+    // Check if all active players have voted
+    if (trialInfo->playersWhoVotedForfeit.size() >= votingThreshold) {
+        std::string reason = "The group has unanimously voted to forfeit the trial.";
+        LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_SUCCESS, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
+        // A forfeit does not trigger permadeath, it's a graceful exit.
+        CleanupTrial(groupId, false);
     }
 }
 
@@ -702,86 +875,108 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
     for (const auto& memberGuid : currentTrial->memberGuids) {
         if (!currentTrial->permanentlyFailedPlayerGuids.count(memberGuid)) {
             Player* player = ObjectAccessor::FindPlayer(memberGuid);
-            if (player && player->IsAlive() && !currentTrial->downedPlayerGuids.count(memberGuid)) { // Also check not downed for this wave
+            if (player && player->IsAlive() && !currentTrial->downedPlayerGuids.count(memberGuid)) {
                 activePlayers++;
             }
         }
     }
-    if (activePlayers == 0 && !currentTrial->memberGuids.empty()) { // Should be caught by other checks, but as a safeguard
+    if (activePlayers == 0 && !currentTrial->memberGuids.empty()) {
         sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: No active players left to spawn wave for. Finalizing trial.", groupId, currentTrial->currentWave);
         FinalizeTrialOutcome(groupId, false, "All players defeated or disconnected before wave " + std::to_string(currentTrial->currentWave) + " could spawn.");
         return;
     }
 
-    uint32 numCreaturesToSpawn = std::min(NUM_SPAWNS_PER_WAVE, activePlayers + 1); // Example: 1 player -> 2 mobs, up to max NUM_SPAWNS_PER_WAVE
-    numCreaturesToSpawn = std::max(numCreaturesToSpawn, 1u); // Ensure at least 1 creature spawns if activePlayers > 0
-
-    const std::vector<uint32>* currentWaveNpcPool = nullptr;
+    const std::vector<std::vector<uint32>>* currentWaveNpcPool = nullptr;
+    const CustomNpcScalingTier* customScalingTier = nullptr;
     float healthMultiplier = 1.0f;
+    const std::vector<uint32>* aurasToAdd = nullptr;
 
-    if (currentTrial->currentWave <= 2) { // Waves 1-2: Easy
-        currentWaveNpcPool = &ModTrialOfFinality::NpcPoolEasy;
-    } else if (currentTrial->currentWave <= 4) { // Waves 3-4: Medium
-        currentWaveNpcPool = &ModTrialOfFinality::NpcPoolMedium;
-        healthMultiplier = 1.2f; // 20% health boost
-    } else { // Wave 5: Hard
-        currentWaveNpcPool = &ModTrialOfFinality::NpcPoolHard;
-        healthMultiplier = 1.5f; // 50% health boost
+    if (currentTrial->currentWave <= 2) {
+        currentWaveNpcPool = &NpcPoolEasy;
+        customScalingTier = &CustomScalingEasy;
+    } else if (currentTrial->currentWave <= 4) {
+        currentWaveNpcPool = &NpcPoolMedium;
+        customScalingTier = &CustomScalingMedium;
+    } else {
+        currentWaveNpcPool = &NpcPoolHard;
+        customScalingTier = &CustomScalingHard;
+    }
+
+    if (NpcScalingMode == "custom_scaling_rules" && customScalingTier) {
+        healthMultiplier = customScalingTier->HealthMultiplier;
+        aurasToAdd = &customScalingTier->AurasToAdd;
+        sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Using CUSTOM scaling rules. HealthMult: %.2f, Auras: %lu",
+            groupId, currentTrial->currentWave, healthMultiplier, (aurasToAdd ? aurasToAdd->size() : 0));
     }
 
     if (!currentWaveNpcPool || currentWaveNpcPool->empty()) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Cannot spawn wave. NPC pool for this difficulty is empty or not configured correctly.",
-            groupId, currentTrial->currentWave);
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Cannot spawn wave. NPC pool for this difficulty is empty.", groupId, currentTrial->currentWave);
         FinalizeTrialOutcome(groupId, false, "Internal error: NPC pool empty for wave " + std::to_string(currentTrial->currentWave));
         return;
     }
 
-    if (numCreaturesToSpawn > currentWaveNpcPool->size()) {
-        sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Requested %u distinct NPCs, but pool only has %lu. Spawning %lu instead.",
-            groupId, currentTrial->currentWave, numCreaturesToSpawn, currentWaveNpcPool->size(), currentWaveNpcPool->size());
-        numCreaturesToSpawn = currentWaveNpcPool->size();
-    }
-    if (numCreaturesToSpawn == 0 && !currentWaveNpcPool->empty()){ // If pool is not empty, but we decided to spawn 0 (e.g. activePlayers was 0 but somehow we reached here)
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Calculated numCreaturesToSpawn is 0, though pool is not empty. This should not happen if activePlayers > 0.", groupId, currentTrial->currentWave);
-        FinalizeTrialOutcome(groupId, false, "Internal error: Calculated 0 creatures to spawn for wave " + std::to_string(currentTrial->currentWave));
-        return;
+    uint32 numGroupsToSpawn = std::min((uint32)NUM_SPAWNS_PER_WAVE, activePlayers + 1);
+    numGroupsToSpawn = std::max(numGroupsToSpawn, 1u);
+
+    if (numGroupsToSpawn > currentWaveNpcPool->size()) {
+        sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Requested %u encounter groups, but pool only has %lu. Spawning %lu instead.",
+            groupId, currentTrial->currentWave, numGroupsToSpawn, currentWaveNpcPool->size(), currentWaveNpcPool->size());
+        numGroupsToSpawn = currentWaveNpcPool->size();
     }
 
-
-    std::vector<uint32> selectedNpcEntries = *currentWaveNpcPool; // Copy the pool
+    std::vector<std::vector<uint32>> selectedGroups = *currentWaveNpcPool;
     std::random_device rd;
     std::mt19937 g(rd());
-    std::shuffle(selectedNpcEntries.begin(), selectedNpcEntries.end(), g); // Shuffle to get random distinct NPCs
+    std::shuffle(selectedGroups.begin(), selectedGroups.end(), g);
 
-    sLog->outMessage("sys", "[TrialOfFinality] Group %u, Wave %d: Spawning %u creatures. Highest Lvl: %u. Health Multi: %.2f",
-        groupId, currentTrial->currentWave, numCreaturesToSpawn, currentTrial->highestLevelAtStart, healthMultiplier);
+    sLog->outMessage("sys", "[TrialOfFinality] Group %u, Wave %d: Spawning %u encounter groups. Highest Lvl: %u. Health Multi: %.2f",
+        groupId, currentTrial->currentWave, numGroupsToSpawn, currentTrial->highestLevelAtStart, healthMultiplier);
     currentTrial->activeMonsters.clear();
 
-    for (uint32 i = 0; i < numCreaturesToSpawn; ++i) {
-        uint32 creatureEntry = selectedNpcEntries[i];
-        const Position& spawnPos = WAVE_SPAWN_POSITIONS[i % NUM_SPAWNS_PER_WAVE]; // Use modulo in case numCreaturesToSpawn > NUM_SPAWN_POSITIONS (though capped by pool size)
+    uint32 spawnPosIndex = 0;
+    uint32 totalCreaturesSpawned = 0;
 
-        if (Creature* creature = trialMap->SummonCreature(creatureEntry, spawnPos, TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 3600 * 1000)) {
-            creature->SetLevel(currentTrial->highestLevelAtStart);
-            if (healthMultiplier > 1.0f) {
-                creature->SetMaxHealth(uint32(creature->GetMaxHealth() * healthMultiplier));
-                creature->SetHealth(creature->GetMaxHealth());
+    for (uint32 i = 0; i < numGroupsToSpawn; ++i) {
+        const std::vector<uint32>& groupOfNpcs = selectedGroups[i];
+        if (spawnPosIndex + groupOfNpcs.size() > NUM_SPAWNS_PER_WAVE) {
+            sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Encounter group with %lu members exceeds remaining spawn points (%u). Skipping group.", groupId, currentTrial->currentWave, groupOfNpcs.size(), NUM_SPAWNS_PER_WAVE - spawnPosIndex);
+            continue;
+        }
+
+        for (uint32 creatureEntry : groupOfNpcs) {
+            const Position& spawnPos = WAVE_SPAWN_POSITIONS[spawnPosIndex++];
+            if (Creature* creature = trialMap->SummonCreature(creatureEntry, spawnPos, TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 3600 * 1000)) {
+                creature->SetLevel(currentTrial->highestLevelAtStart);
+
+                if (healthMultiplier != 1.0f) {
+                    creature->SetMaxHealth(uint32(creature->GetMaxHealth() * healthMultiplier));
+                    creature->SetHealth(creature->GetMaxHealth());
+                }
+
+                if (aurasToAdd) {
+                    for (uint32 auraId : *aurasToAdd) {
+                        creature->AddAura(auraId, creature);
+                    }
+                }
+
+                currentTrial->activeMonsters.insert(creature->GetGUID());
+                totalCreaturesSpawned++;
+                sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Spawned NPC %u (GUID %s) at %f,%f,%f",
+                    groupId, currentTrial->currentWave, creatureEntry, creature->GetGUID().ToString().c_str(), spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
+            } else {
+                sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn NPC %u at %f,%f,%f",
+                    groupId, currentTrial->currentWave, creatureEntry, spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
             }
-            // Make creatures aggressive or link them if needed by AI or scripts
-            // creature->SetReactState(REACT_AGGRESSIVE); // Example
-            currentTrial->activeMonsters.insert(creature->GetGUID());
-            sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Spawned NPC %u (GUID %s) at %f,%f,%f",
-                groupId, currentTrial->currentWave, creatureEntry, creature->GetGUID().ToString().c_str(), spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
-        } else {
-            sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn NPC %u at %f,%f,%f",
-                groupId, currentTrial->currentWave, creatureEntry, spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
         }
     }
-     if (currentTrial->activeMonsters.empty() && numCreaturesToSpawn > 0) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn ANY monsters despite requesting %u. Finalizing trial.", groupId, currentTrial->currentWave, numCreaturesToSpawn);
+
+    if (currentTrial->activeMonsters.empty() && !currentWaveNpcPool->empty()) {
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn ANY monsters. Check pool config and spawn positions. Finalizing trial.", groupId, currentTrial->currentWave);
         FinalizeTrialOutcome(groupId, false, "Internal error: Failed to spawn any NPCs for wave " + std::to_string(currentTrial->currentWave));
         return;
     }
+
+    sLog->outMessage("sys", "[TrialOfFinality] Group %u, Wave %d: Spawned a total of %u creatures.", groupId, currentTrial->currentWave, totalCreaturesSpawned);
 }
 
 void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) {
@@ -1190,8 +1385,7 @@ void TrialManager::TriggerCityNpcCheers(uint32 /*successfulGroupId*/) {
                     creature->HandleEmoteCommand(EMOTE_ONESHOT_CHEER); // First cheer
 
                     if (CheeringNpcsCheerIntervalMs > 0) {
-                        sLog->outDetail("[TrialOfFinality] NPC %s (GUID %u) would perform a second cheer after %u ms.",
-                                        creature->GetName().c_str(), creature->GetGUID().GetCounter(), CheeringNpcsCheerIntervalMs);
+                        m_pendingSecondCheers.push_back({npcGuid, time(nullptr) + (CheeringNpcsCheerIntervalMs / 1000)});
                     }
 
                     alreadyCheeringNpcs.insert(npcGuid);
@@ -1472,6 +1666,9 @@ public:
         }
         sLog->outDetail("[TrialOfFinality] Trial Confirmation Required Mode: %s", ConfirmationRequiredMode.c_str());
 
+        ForfeitEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.Forfeit.Enable", true);
+        sLog->outDetail("[TrialOfFinality] Forfeit System: %s", ForfeitEnable ? "Enabled" : "Disabled");
+
         WorldAnnounceEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.AnnounceWinners.World.Enable", true);
         WorldAnnounceFormat = sConfigMgr->GetOption<std::string>("TrialOfFinality.AnnounceWinners.World.MessageFormat",
             "Hark, heroes! The group led by {group_leader}, with valiant trialists {player_list}, has vanquished all foes and emerged victorious from the Trial of Finality! All hail the Conquerors!");
@@ -1516,10 +1713,6 @@ public:
             {
                 query << " AND (npcflag & " << CheeringNpcsTargetNpcFlags << ") != 0";
             }
-            else
-            {
-                query << " AND npcflag = 0";
-            }
 
             if (CheeringNpcsExcludeNpcFlags != 0)
             {
@@ -1558,22 +1751,19 @@ public:
             sLog->outMessage("sys", "[TrialOfFinality] No City Zone IDs configured for cheering NPCs, cache not populated.");
         }
 
-        // Helper lambda for parsing NPC pool strings
-        auto parseNpcPoolString = [](const std::string& poolStr, const std::string& poolName) -> std::vector<uint32> {
-            std::vector<uint32> pool;
-            if (poolStr.empty()) {
-                sLog->outWarn("sys", "[TrialOfFinality] NPC Pool '%s' is empty or not found in configuration. Using empty pool.", poolName.c_str());
-                return pool;
+        // Helper lambda for parsing aura ID strings
+        auto parseAuraIdString = [](const std::string& auraStr, const std::string& tierName) -> std::vector<uint32> {
+            std::vector<uint32> auras;
+            if (auraStr.empty()) {
+                return auras;
             }
 
-            std::stringstream ss(poolStr);
+            std::stringstream ss(auraStr);
             std::string item;
-            int validCount = 0;
-            int invalidCount = 0;
             while (getline(ss, item, ',')) {
-                // Trim whitespace from item
+                // Trim whitespace
                 size_t first = item.find_first_not_of(" \t\n\r\f\v");
-                if (std::string::npos == first) continue; // item is all whitespace
+                if (std::string::npos == first) continue;
                 size_t last = item.find_last_not_of(" \t\n\r\f\v");
                 item = item.substr(first, (last - first + 1));
 
@@ -1582,31 +1772,115 @@ public:
                 try {
                     unsigned long id_ul = std::stoul(item);
                     if (id_ul == 0 || id_ul > UINT32_MAX) {
-                        sLog->outError("sys", "[TrialOfFinality] Invalid Creature ID '%s' (out of range or zero) in NPC Pool '%s'. Skipping.", item.c_str(), poolName.c_str());
-                        invalidCount++;
+                        sLog->outError("sys", "[TrialOfFinality] Invalid Aura ID '%s' (out of range or zero) in Custom Scaling for tier '%s'. Skipping.", item.c_str(), tierName.c_str());
                         continue;
                     }
-                    CreatureTemplate const* cInfo = sObjectMgr->GetCreatureTemplate(static_cast<uint32>(id_ul));
-                    if (!cInfo) {
-                        sLog->outError("sys", "[TrialOfFinality] Creature ID %lu in NPC Pool '%s' does not exist in creature_template. Skipping.", id_ul, poolName.c_str());
-                        invalidCount++;
+                    if (!sSpellMgr->GetSpellInfo(static_cast<uint32>(id_ul))) {
+                        sLog->outError("sys", "[TrialOfFinality] Aura ID %lu in Custom Scaling for tier '%s' does not exist. Skipping.", id_ul, tierName.c_str());
                         continue;
                     }
-                    pool.push_back(static_cast<uint32>(id_ul));
-                    validCount++;
-                } catch (const std::invalid_argument& ia) {
-                    sLog->outError("sys", "[TrialOfFinality] Invalid Creature ID '%s' (not a number) in NPC Pool '%s'. Skipping. Error: %s", item.c_str(), poolName.c_str(), ia.what());
-                    invalidCount++;
-                } catch (const std::out_of_range& oor) {
-                    sLog->outError("sys", "[TrialOfFinality] Creature ID '%s' (out of range for stoul) in NPC Pool '%s'. Skipping. Error: %s", item.c_str(), poolName.c_str(), oor.what());
-                    invalidCount++;
+                    auras.push_back(static_cast<uint32>(id_ul));
+                } catch (const std::exception& e) {
+                    sLog->outError("sys", "[TrialOfFinality] Invalid Aura ID '%s' in Custom Scaling for tier '%s'. Skipping. Error: %s", item.c_str(), tierName.c_str(), e.what());
                 }
             }
-            sLog->outDetail("[TrialOfFinality] Loaded %d valid NPCs for pool '%s' (encountered %d invalid or non-existent entries).", validCount, poolName.c_str(), invalidCount);
-            if (pool.empty() && validCount == 0 && invalidCount == 0 && !poolStr.empty()){
-                 sLog->outWarn("sys", "[TrialOfFinality] NPC Pool '%s' was configured as '%s' but resulted in an empty pool after parsing (check for formatting issues like trailing commas).", poolName.c_str(), poolStr.c_str());
-            } else if (pool.empty() && (validCount > 0 || invalidCount > 0)) {
-                 sLog->outError("sys", "[TrialOfFinality] NPC Pool '%s' is empty after processing entries. Trial may not function correctly if this pool is used.", poolName.c_str());
+            sLog->outDetail("[TrialOfFinality] Loaded %lu auras for custom scaling tier '%s'.", auras.size(), tierName.c_str());
+            return auras;
+        };
+
+        // Helper lambda for parsing NPC pool strings with encounter groups
+        auto parseNpcPoolString = [](const std::string& poolStr, const std::string& poolName) -> std::vector<std::vector<uint32>> {
+            std::vector<std::vector<uint32>> pool;
+            if (poolStr.empty()) {
+                sLog->outWarn("sys", "[TrialOfFinality] NPC Pool '%s' is empty or not found in configuration.", poolName.c_str());
+                return pool;
+            }
+
+            std::string currentNumber;
+            std::vector<uint32> currentGroup;
+            bool inGroup = false;
+            int entryCount = 0;
+            int invalidCount = 0;
+
+            auto processNumber = [&](bool isEndOfGroup) {
+                if (currentNumber.empty()) {
+                    if (isEndOfGroup) { // e.g. (1,)
+                        sLog->outError("sys", "[TrialOfFinality] Malformed group in NPC Pool '%s' (e.g., empty entry or trailing comma).", poolName.c_str());
+                        invalidCount++;
+                    }
+                    return;
+                }
+
+                try {
+                    uint32 id = std::stoul(currentNumber);
+                    if (id == 0) {
+                         sLog->outError("sys", "[TrialOfFinality] Creature ID 0 is invalid in NPC Pool '%s'.", poolName.c_str());
+                         invalidCount++;
+                         currentNumber.clear();
+                         return;
+                    }
+                    if (!sObjectMgr->GetCreatureTemplate(id)) {
+                        sLog->outError("sys", "[TrialOfFinality] Creature ID %u in NPC Pool '%s' does not exist. Skipping.", id, poolName.c_str());
+                        invalidCount++;
+                        currentNumber.clear();
+                        return;
+                    }
+
+                    if (inGroup) {
+                        currentGroup.push_back(id);
+                    } else {
+                        pool.push_back({id});
+                    }
+                    entryCount++;
+                } catch (const std::exception& e) {
+                    sLog->outError("sys", "[TrialOfFinality] Invalid Creature ID format '%s' in NPC Pool '%s'. Error: %s", currentNumber.c_str(), poolName.c_str(), e.what());
+                    invalidCount++;
+                }
+                currentNumber.clear();
+            };
+
+            for (char c : poolStr) {
+                if (std::isspace(c)) continue;
+
+                if (std::isdigit(c)) {
+                    currentNumber += c;
+                } else if (c == '(') {
+                    if (inGroup) {
+                        sLog->outError("sys", "[TrialOfFinality] Nested parentheses are not allowed in NPC Pool '%s'. Aborting parse.", poolName.c_str());
+                        return {};
+                    }
+                    processNumber(false); // Process any pending single number before the group
+                    inGroup = true;
+                    currentGroup.clear();
+                } else if (c == ')') {
+                    if (!inGroup) {
+                        sLog->outError("sys", "[TrialOfFinality] Mismatched closing parenthesis in NPC Pool '%s'. Aborting parse.", poolName.c_str());
+                        return {};
+                    }
+                    processNumber(true); // Process the last number inside the parenthesis
+                    if (!currentGroup.empty()) {
+                        pool.push_back(currentGroup);
+                    } else if (invalidCount > 0) {
+                        sLog->outWarn("sys", "[TrialOfFinality] An encounter group in NPC Pool '%s' was invalid and has been skipped.", poolName.c_str());
+                    }
+                    inGroup = false;
+                } else if (c == ',') {
+                    processNumber(inGroup); // Process the number before the comma
+                } else {
+                    sLog->outError("sys", "[TrialOfFinality] Invalid character '%c' in NPC Pool '%s'. Aborting parse.", c, poolName.c_str());
+                    return {};
+                }
+            }
+
+            if (inGroup) {
+                sLog->outError("sys", "[TrialOfFinality] Unclosed parenthesis at end of NPC Pool '%s'. Aborting parse.", poolName.c_str());
+                return {};
+            }
+            processNumber(false); // Process any trailing number
+
+            sLog->outDetail("[TrialOfFinality] Loaded %lu encounter groups with a total of %d valid NPC entries for pool '%s' (%d invalid entries skipped).", pool.size(), entryCount, poolName.c_str(), invalidCount);
+            if (pool.empty() && !poolStr.empty()) {
+                 sLog->outWarn("sys", "[TrialOfFinality] NPC Pool '%s' was configured as '%s' but resulted in an empty pool after parsing. Check formatting.", poolName.c_str(), poolStr.c_str());
             }
             return pool;
         };
@@ -1624,6 +1898,17 @@ public:
         NpcPoolEasy = parseNpcPoolString(easyPoolStr, "Easy");
         NpcPoolMedium = parseNpcPoolString(mediumPoolStr, "Medium");
         NpcPoolHard = parseNpcPoolString(hardPoolStr, "Hard");
+
+        // Load Custom Scaling Rules
+        sLog->outDetail("[TrialOfFinality] Loading Custom NPC Scaling Rules...");
+        CustomScalingEasy.HealthMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Easy.HealthMultiplier", 1.0f);
+        CustomScalingEasy.AurasToAdd = parseAuraIdString(sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Custom.Easy.AurasToAdd", ""), "Easy");
+
+        CustomScalingMedium.HealthMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Medium.HealthMultiplier", 1.2f);
+        CustomScalingMedium.AurasToAdd = parseAuraIdString(sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Custom.Medium.AurasToAdd", ""), "Medium");
+
+        CustomScalingHard.HealthMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Hard.HealthMultiplier", 1.5f);
+        CustomScalingHard.AurasToAdd = parseAuraIdString(sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Custom.Hard.AurasToAdd", ""), "Hard");
 
         if (!FateweaverArithosEntry || !TrialTokenEntry || !AnnouncerEntry || !TitleRewardID) {
             sLog->outError("sys", "Trial of Finality: Critical EntryID (NPC, Item, Title) not configured. Disabling module functionality.");
@@ -1750,11 +2035,35 @@ public:
 
     std::vector<ChatCommand> GetCommands() const override
     {
-        static std::vector<ChatCommand> commandTable = {
-            { "trialconfirm", SEC_PLAYER, true, &HandleTrialConfirmCommand, "Confirms or denies participation in the Trial of Finality. Usage: /trialconfirm <yes|no>" },
-            { "tc",           SEC_PLAYER, true, &HandleTrialConfirmCommand, "Alias for /trialconfirm. Usage: /tc <yes|no>" } // Alias
-        };
+        static std::vector<ChatCommand> commandTable;
+
+        if (commandTable.empty()) {
+            commandTable.push_back({ "trialconfirm", SEC_PLAYER, true, &HandleTrialConfirmCommand, "Confirms or denies participation in the Trial of Finality. Usage: /trialconfirm <yes|no>" });
+            commandTable.push_back({ "tc",           SEC_PLAYER, true, &HandleTrialConfirmCommand, "Alias for /trialconfirm. Usage: /tc <yes|no>" });
+            if (ForfeitEnable) {
+                commandTable.push_back({ "trialforfeit", SEC_PLAYER, true, &HandleTrialForfeitCommand, "Votes to forfeit the current Trial of Finality." });
+                commandTable.push_back({ "tf",           SEC_PLAYER, true, &HandleTrialForfeitCommand, "Alias for /trialforfeit." });
+            }
+        }
         return commandTable;
+    }
+
+    static bool HandleTrialForfeitCommand(ChatHandler* handler, const char* /*args*/)
+    {
+        Player* player = handler->GetPlayer();
+        if (!player) {
+            handler->SendSysMessage("This command can only be used by a player.");
+            return false;
+        }
+
+        if (!ModuleEnabled) {
+            ChatHandler(player->GetSession()).SendSysMessage("The Trial of Finality module is currently disabled.");
+            return false;
+        }
+
+        sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) is attempting to use /trialforfeit command.", player->GetName().c_str(), player->GetGUID().GetCounter());
+        TrialManager::instance()->HandleTrialForfeit(player);
+        return true;
     }
 
     static bool HandleTrialConfirmCommand(ChatHandler* handler, const char* args)
