@@ -1187,12 +1187,7 @@ void TrialManager::TriggerCityNpcCheers(uint32 /*successfulGroupId*/) {
                 if (creature && creature->IsAlive() && !creature->IsInCombat() && player->IsWithinDistInMap(creature, CheeringNpcsRadiusAroundPlayer)) {
                     // NpcFlag checks were done at caching time, so not strictly needed here
                     // but could be added if dynamic flags are a concern.
-                    creature->HandleEmoteCommand(EMOTE_ONESHOT_CHEER); // First cheer
-
-                    if (CheeringNpcsCheerIntervalMs > 0) {
-                        sLog->outDetail("[TrialOfFinality] NPC %s (GUID %u) would perform a second cheer after %u ms.",
-                                        creature->GetName().c_str(), creature->GetGUID().GetCounter(), CheeringNpcsCheerIntervalMs);
-                    }
+                    creature->HandleEmoteCommand(EMOTE_ONESHOT_CHEER);
 
                     alreadyCheeringNpcs.insert(npcGuid);
                     cheeredThisCluster++;
@@ -1515,10 +1510,6 @@ public:
             if (CheeringNpcsTargetNpcFlags != UNIT_NPC_FLAG_NONE)
             {
                 query << " AND (npcflag & " << CheeringNpcsTargetNpcFlags << ") != 0";
-            }
-            else
-            {
-                query << " AND npcflag = 0";
             }
 
             if (CheeringNpcsExcludeNpcFlags != 0)
