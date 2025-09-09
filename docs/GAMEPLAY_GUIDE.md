@@ -23,8 +23,9 @@ This guide details the gameplay mechanics of the Trial of Finality.
 ## During the Trial
 *   Upon starting, all group members receive a **Trial Token**, have XP gain disabled, and are teleported to the designated arena.
 *   The **Trial Announcer** will provide commentary and announce incoming waves.
-*   There are 5 waves of NPCs. NPC types are randomly selected from pools configured in `mod_trial_of_finality.conf`.
-*   The number of NPCs per wave scales with the number of active (not perma-deathed) players.
+
+*   There are 5 waves of NPCs. Waves are composed of "Encounter Groups" randomly selected from pools defined in the configuration. This means some waves might feature single, powerful enemies, while others might have groups of weaker enemies that spawn together.
+*   The number of Encounter Groups spawned per wave scales with the number of active (not perma-deathed) players.
 *   Creature levels match the highest level in the group at trial start. Later waves feature health-boosted NPCs.
 
 ## Death, Resurrection, and Perma-Death
@@ -38,6 +39,10 @@ This guide details the gameplay mechanics of the Trial of Finality.
 *   Successfully defeating all 5 waves with at least one original member surviving results in trial success.
 *   **Rewards (for each eligible survivor):** Configurable gold amount and a unique title.
 *   Trial Tokens are removed, XP gain is re-enabled, and survivors are teleported out.
+
+## Forfeiting the Trial
+*   At any point during the trial, players can use the `/trialforfeit` or `/tf` command.
+*   This initiates a vote among all active (alive and not perma-deathed) members. If all active members vote to forfeit, the trial ends gracefully with no perma-death penalties. A vote is only possible when two or more players are active in the trial.
 
 ## Trial Failure
 *   Failure occurs on a group wipe, if all players are perma-deathed, or due to critical errors (e.g., misconfigured NPC pools).

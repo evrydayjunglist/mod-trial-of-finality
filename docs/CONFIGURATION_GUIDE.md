@@ -17,8 +17,8 @@ This guide provides a detailed explanation of all configuration options availabl
 ## Rewards
 *   **`TrialOfFinality.TitleReward.ID`**: (uint32, default: `0` - example `100`)
     *   The ID of the character title (from `CharTitles.dbc`) awarded to players who successfully complete the trial.
-*   **`TrialOfFinality.GoldReward`**: (uint32, default: `20000`)
-    *   Amount of gold (in copper coins, so `20000` is 2 gold) awarded to each eligible surviving member upon successful completion.
+*   **`TrialOfFinality.GoldReward`**: (uint32, default: `200000000`)
+    *   Amount of gold (in copper coins, so `200000000` is 20,000 gold) awarded to each eligible surviving member upon successful completion.
 
 ## Gameplay Rules
 *   **`TrialOfFinality.MinGroupSize`**: (uint8, default: `1`)
@@ -54,17 +54,39 @@ This guide provides a detailed explanation of all configuration options availabl
     *   Health multiplier and auras for Hard tier NPCs (Wave 5).
 
 ## NPC Wave Creature Pools
-These settings define the pools of creature entry IDs for each wave difficulty tier. IDs must be comma-separated strings (e.g., `"123,456,789"`). Whitespace around IDs is automatically trimmed during parsing.
 
+These settings define the pools of creatures that can be spawned for each wave difficulty tier. The module now supports **Encounter Groups**, allowing you to define sets of NPCs that will always spawn together.
+
+### Syntax
+*   **Individual NPCs**: List creature entry IDs separated by commas.
+    *   Example: `70001,70002,70003`
+*   **Encounter Groups**: Enclose a comma-separated list of creature IDs in parentheses `()`.
+    *   Example: `(70004,70005)`
+*   **Mixed Pools**: You can combine individual NPCs and encounter groups in the same pool string.
+    *   Example: `70001,(70002,70003),(70004,70005),70006`
+
+In the mixed example above, the trial has four possible "spawn choices" for a wave:
+1.  Creature `70001` (a single spawn)
+2.  Creatures `70002` and `70003` (spawned together as a group)
+3.  Creatures `70004` and `70005` (spawned together as a group)
+4.  Creature `70006` (a single spawn)
+
+The wave generation logic will randomly select from these choices. Note that the total number of creatures spawned in a wave cannot exceed the number of available spawn points (default is 5). If a chosen encounter group is too large for the remaining spawn points, it will be skipped.
+
+### Validation
 **It is CRUCIAL that these IDs correspond to actual creature templates in your database.** The module performs checks during config loading:
-*   Each item is validated to be a number.
-*   Each number is checked to be within `uint32` valid range (not zero).
+*   The string format is checked for errors like mismatched or nested parentheses.
+*   Each ID is validated to be a valid number.
 *   Each valid numeric ID is checked against `sObjectMgr->GetCreatureTemplate` to ensure the creature template exists.
-Invalid entries or non-existent template IDs are logged as errors and skipped. If a pool is empty after parsing (either due to an empty config string or all entries being invalid), waves requiring that pool will fail to spawn, likely resulting in the trial ending prematurely with an error. Customize these from the provided defaults.
+Invalid entries or formatting errors are logged, and the invalid group or entry is skipped. If a pool is empty after parsing, waves requiring that pool will fail to spawn.
 
+### Configuration Settings
 *   **`TrialOfFinality.NpcPools.Easy`**: (string, default: `"70001,70002,70003,70004,70005,70006,70007,70008,70009,70010"`)
+    *   Defines the pool for waves 1-2.
 *   **`TrialOfFinality.NpcPools.Medium`**: (string, default: `"70011,70012,70013,70014,70015,70016,70017,70018,70019,70020"`)
+    *   Defines the pool for waves 3-4.
 *   **`TrialOfFinality.NpcPools.Hard`**: (string, default: `"70021,70022,70023,70024,70025,70026,70027,70028,70029,70030"`)
+    *   Defines the pool for the final wave 5.
 
 ## Perma-Death Settings
 *   **`TrialOfFinality.PermaDeath.ExemptGMs`**: (boolean, default: `true`)
