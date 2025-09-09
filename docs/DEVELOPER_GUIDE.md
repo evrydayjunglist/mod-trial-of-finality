@@ -2,6 +2,8 @@
 
 This document provides in-depth technical details for the `mod_trial_of_finality` module, intended for developers, advanced administrators, or those looking to contribute. For user-focused installation, setup, and gameplay information, please see the main [README.md](../README.md). For comprehensive test plans and scenarios, refer to the [Testing Guide](testing_guide.md).
 
+For a complete list of all configuration options, please see the [Configuration Guide](docs/CONFIGURATION_GUIDE.md).
+
 ## 2. Core Module Architecture
 
 The `mod_trial_of_finality` module revolves around several key classes and a defined event flow to manage its complex PVE challenge.
@@ -44,119 +46,7 @@ The `mod_trial_of_finality` module revolves around several key classes and a def
 6.  **Cleanup:** `TrialManager::CleanupTrial` removes trial data, re-enables XP, and teleports survivors.
 7.  **Login Check:** `ModPlayerScript::OnLogin` checks the `character_trial_finality_status` table for any player attempting to log in. If `is_perma_failed = 1`, the player session is kicked.
 
-## 3. Detailed Configuration (`mod_trial_of_finality.conf`)
-
-The following provides a detailed explanation of all configuration options available in `mod_trial_of_finality.conf`.
-
-*   **`TrialOfFinality.Enable`**: (boolean, default: `true`)
-    *   Enables or disables the entire module. If `false`, NPCs will not be interactable for trial purposes, and GM commands might be restricted.
-
-*   **`TrialOfFinality.FateweaverArithos.EntryID`**: (uint32, default: `0` - example `90000`)
-    *   Creature Entry ID for the Fateweaver Arithos NPC, who initiates the trial. This ID must exist in your `creature_template`.
-*   **`TrialOfFinality.Announcer.EntryID`**: (uint32, default: `0` - example `90002`)
-    *   Creature Entry ID for the Trial Announcer NPC that provides commentary during the trial. This ID must exist in your `creature_template`.
-*   **`TrialOfFinality.TrialToken.EntryID`**: (uint32, default: `0` - example `90001`)
-    *   Item Entry ID for the "Trial Token" item. This item must exist in your `item_template`. It signifies participation and is consumed or removed upon trial completion or reset.
-
-*   **`TrialOfFinality.TitleReward.ID`**: (uint32, default: `0` - example `100`)
-    *   The ID of the character title (from `CharTitles.dbc`) awarded to players who successfully complete the trial.
-*   **`TrialOfFinality.GoldReward`**: (uint32, default: `20000`)
-    *   Amount of gold (in copper coins, so `20000` is 2 gold) awarded to each eligible surviving member upon successful completion.
-
-*   **`TrialOfFinality.MinGroupSize`**: (uint8, default: `1`)
-    *   Minimum number of players required in a group to start the trial.
-*   **`TrialOfFinality.MaxGroupSize`**: (uint8, default: `5`)
-    *   Maximum number of players allowed in a group to start the trial.
-*   **`TrialOfFinality.MaxLevelDifference`**: (uint8, default: `10`)
-    *   Maximum allowed level difference between the highest and lowest level players in the group.
-
-*   **`TrialOfFinality.Arena.MapID`**: (uint16, default: `0`)
-    *   The Map ID of the arena where the trial takes place.
-*   **`TrialOfFinality.Arena.TeleportX`**: (float, default: `0.0`)
-*   **`TrialOfFinality.Arena.TeleportY`**: (float, default: `0.0`)
-*   **`TrialOfFinality.Arena.TeleportZ`**: (float, default: `0.0`)
-*   **`TrialOfFinality.Arena.TeleportO`**: (float, default: `0.0`)
-    *   The X, Y, Z, and Orientation coordinates for teleporting players into the trial arena.
-
-*   **`TrialOfFinality.NpcScaling.Mode`**: (string, default: `"match_highest_level"`)
-    *   Defines how NPC levels are determined.
-    *   `"match_highest_level"`: The default mode. NPC levels match the highest level in the group. Health is boosted by a hardcoded multiplier for Medium (+20%) and Hard (+50%) waves.
-    *   `"custom_scaling_rules"`: Enables the custom scaling rules below, allowing for finer control over NPC difficulty.
-*   **`TrialOfFinality.NpcScaling.Custom.Easy.HealthMultiplier`**: (float, default: `1.0`)
-*   **`TrialOfFinality.NpcScaling.Custom.Easy.DamageMultiplier`**: (float, default: `1.0`)
-*   **`TrialOfFinality.NpcScaling.Custom.Easy.AurasToAdd`**: (string, default: `""`)
-    *   Health and damage multipliers for Easy tier NPCs (Waves 1-2). `AurasToAdd` is a comma-separated list of spell IDs to apply to the NPCs.
-*   **`TrialOfFinality.NpcScaling.Custom.Medium.HealthMultiplier`**: (float, default: `1.2`)
-*   **`TrialOfFinality.NpcScaling.Custom.Medium.DamageMultiplier`**: (float, default: `1.2`)
-*   **`TrialOfFinality.NpcScaling.Custom.Medium.AurasToAdd`**: (string, default: `""`)
-    *   Multipliers and auras for Medium tier NPCs (Waves 3-4).
-*   **`TrialOfFinality.NpcScaling.Custom.Hard.HealthMultiplier`**: (float, default: `1.5`)
-*   **`TrialOfFinality.NpcScaling.Custom.Hard.DamageMultiplier`**: (float, default: `1.5`)
-*   **`TrialOfFinality.NpcScaling.Custom.Hard.AurasToAdd`**: (string, default: `""`)
-    *   Multipliers and auras for Hard tier NPCs (Wave 5).
-*   **`TrialOfFinality.DisableCharacter.Method`**: (string, default: `"custom_flag"`)
-    *   This option is largely informational due to the implementation of a database-driven perma-death system.
-    *   Historically, `"custom_flag"` referred to using `AURA_ID_TRIAL_PERMADEATH` (40000) for perma-death. The primary mechanism is now the `is_perma_failed` flag in the `character_trial_finality_status` table.
-*   **`TrialOfFinality.GMDebug.Enable`**: (boolean, default: `false`)
-    *   Intended for enabling verbose debug logging or specific GM-only debug features. Currently, GM commands (`.trial reset`, `.trial test start`) are available if the module is enabled, regardless of this setting. It can be used by developers for conditional debug code.
-
-*   **`TrialOfFinality.AnnounceWinners.World.Enable`**: (boolean, default: `true`)
-    *   If `true`, a server-wide announcement will be made when a group successfully completes the Trial of Finality.
-*   **`TrialOfFinality.AnnounceWinners.World.MessageFormat`**: (string, default: `"Hark, heroes! The group led by {group_leader}, with valiant trialists {player_list}, has vanquished all foes and emerged victorious from the Trial of Finality! All hail the Conquerors!"`)
-    *   The format string for the world announcement. Available placeholders:
-        *   `{group_leader}`: Name of the group leader.
-        *   `{player_list}`: Comma-separated list of surviving player names who completed the trial.
-
-*   **`TrialOfFinality.PermaDeath.ExemptGMs`**: (boolean, default: `true`)
-    *   If `true`, player accounts with a security level of `SEC_GAMEMASTER` or higher will not have the `is_perma_failed` flag set in the `character_trial_finality_status` table if they "die" and are not resurrected during a trial. This allows GMs to test mechanics without risking their characters. They will still be considered "failed" for the purpose of that specific trial instance's rewards.
-
-### Trial Confirmation Settings
-*   **`TrialOfFinality.Confirmation.Enable`**: (boolean, default: `true`)
-    *   Enables or disables the trial start confirmation system. If `true`, group members (excluding the leader) must confirm their participation via `/trialconfirm yes`. If `false`, `TrialManager::InitiateTrial` bypasses the confirmation prompt phase and attempts to start the trial directly (still creating a temporary `PendingTrialInfo` which is immediately processed as if all confirmed).
-*   **`TrialOfFinality.Confirmation.TimeoutSeconds`**: (uint32, default: `60`)
-    *   The number of seconds group members have to respond to a trial confirmation prompt. This timeout is managed by `TrialManager::UpdatePendingConfirmations`.
-*   **`TrialOfFinality.Confirmation.RequiredMode`**: (string, default: `"all"`)
-    *   Defines how many members need to confirm.
-    *   `"all"`: All prompted members (online members of the group, excluding the leader) must type `/trialconfirm yes`. A single `/trialconfirm no` from any member will abort the trial initiation. If members time out, and not all have said "yes", it's also aborted.
-    *   Future modes like `"majority"` or `"leader_plus_one"` are not currently implemented but this setting allows for future expansion. The C++ code currently defaults to "all" if an unsupported mode is specified.
-
-### NPC Wave Creature Pools
-These settings define the pools of creature entry IDs for each wave difficulty tier. IDs must be comma-separated strings (e.g., `"123,456,789"`). Whitespace around IDs is automatically trimmed during parsing.
-
-**It is CRUCIAL that these IDs correspond to actual creature templates in your database.** The module performs checks during config loading:
-*   Each item is validated to be a number.
-*   Each number is checked to be within `uint32` valid range (not zero).
-*   Each valid numeric ID is checked against `sObjectMgr->GetCreatureTemplate` to ensure the creature template exists.
-Invalid entries or non-existent template IDs are logged as errors and skipped. If a pool is empty after parsing (either due to an empty config string or all entries being invalid), waves requiring that pool will fail to spawn, likely resulting in the trial ending prematurely with an error. Customize these from the provided defaults.
-
-*   **`TrialOfFinality.NpcPools.Easy`**: (string, default: `"70001,70002,70003,70004,70005,70006,70007,70008,70009,70010"`)
-    *   Creature IDs for easy waves (typically Waves 1-2).
-*   **`TrialOfFinality.NpcPools.Medium`**: (string, default: `"70011,70012,70013,70014,70015,70016,70017,70018,70019,70020"`)
-    *   Creature IDs for medium waves (typically Waves 3-4). These NPCs also receive a 20% health boost.
-*   **`TrialOfFinality.NpcPools.Hard`**: (string, default: `"70021,70022,70023,70024,70025,70026,70027,70028,70029,70030"`)
-    *   Creature IDs for hard waves (typically Wave 5). These NPCs also receive a 50% health boost.
-
-### NPC Cheering Settings
-Controls the NPC cheering feature upon successful trial completion. This uses a server-startup cache of eligible NPCs.
-
-*   **`TrialOfFinality.CheeringNpcs.Enable`**: (boolean, default: `true`)
-    *   Enables or disables the NPC cheering feature.
-*   **`TrialOfFinality.CheeringNpcs.CityZoneIDs`**: (string, default: `"1519,1537,1637,1638,1657,3487,4080,4395,3557"`)
-    *   Comma-separated string of Zone IDs where NPCs are eligible to cheer (e.g., major cities).
-*   **`TrialOfFinality.CheeringNpcs.RadiusAroundPlayer`**: (float, default: `40.0`)
-    *   Radius (in yards) around a victorious player (in a cheering zone) to find cached NPCs to cheer.
-*   **`TrialOfFinality.CheeringNpcs.MaxNpcsToCheerPerPlayerCluster`**: (int, default: `5`)
-    *   Maximum NPCs to cheer around a single player or a close cluster of players.
-*   **`TrialOfFinality.CheeringNpcs.MaxTotalNpcsToCheerWorld`**: (int, default: `50`)
-    *   Overall maximum NPCs to cheer across the world for one trial success event.
-*   **`TrialOfFinality.CheeringNpcs.TargetNpcFlags`**: (uint32, default: `0` which is `UNIT_NPC_FLAG_NONE`)
-    *   NPCs must have at least one of these flags (bitwise OR) to be considered for cheering. `0` means any NPC type (not specifically excluded) can cheer. Other flags include `GOSSIP (1)`, `QUESTGIVER (2)`, etc.
-*   **`TrialOfFinality.CheeringNpcs.ExcludeNpcFlags`**: (uint32, default: `32764`)
-    *   NPCs with any of these flags (bitwise OR) will be excluded, even if targeted. Default value excludes common utility NPCs (vendors, trainers, etc.).
-*   **`TrialOfFinality.CheeringNpcs.CheerIntervalMs`**: (uint32, default: `2000`)
-    *   Intended interval in milliseconds for a second cheer. Currently, the second cheer is only logged; its delayed execution is not yet implemented. `0` disables this.
-
-## 4. Database Schema
+## 3. Database Schema
 
 ### Schema Deployment
 
@@ -188,7 +78,7 @@ Stores the perma-death status of characters. This is the authoritative source fo
     *   `is_perma_failed` (TINYINT(1) UNSIGNED, default: 0): Boolean flag. `1` if the character is perma-failed, `0` otherwise.
     *   `last_failed_timestamp` (TIMESTAMP, NULL, default: NULL): Timestamp of when `is_perma_failed` was last set to `1`. Automatically updated by C++ logic.
 
-## 5. Key System Internals
+## 4. Key System Internals
 
 *   **Perma-Death Logic:**
     *   When a trial fails and players are eligible for perma-death, `TrialManager::FinalizeTrialOutcome` is invoked.
@@ -216,9 +106,9 @@ Stores the perma-death status of characters. This is the authoritative source fo
     *   If the selected pool is empty (due to misconfiguration or all IDs being invalid), the trial is ended with an error.
     *   The number of creatures to spawn (`numCreaturesToSpawn`) is determined based on active player count, capped by `NUM_SPAWNS_PER_WAVE` and the selected pool's size.
     *   A copy of the selected pool is shuffled, and the required number of distinct creature IDs are picked.
-    *   Creatures are summoned, their level set to the trial's `highestLevelAtStart`, and a health multiplier is applied for medium (1.2x) and hard (1.5x) waves.
+    *   Creatures are summoned, their level set to the trial's `highestLevelAtStart`, and a health multiplier is applied for medium (1.2x) and hard (1.5x) waves (if not using custom scaling).
 
-## 6. Key Constants and Enums (from C++)
+## 5. Key Constants and Enums (from C++)
 
 *   **`AURA_ID_TRIAL_PERMADEATH (40000)`:** This constant (defined in `ModTrialOfFinality.h` or .cpp) represents a placeholder Aura ID. Historically, it was the primary marker for perma-death. With the introduction of the `character_trial_finality_status` table, this aura's role is diminished. It's no longer applied as the persistent lock and is actively removed if found when the DB flag is set or by the `.trial reset` command. It might be used for immediate, temporary in-session visual effects if desired, but the database is the authoritative source.
 *   **`WAVE_SPAWN_POSITIONS[]`:** A hardcoded array of `Position` structs defining the 5 spawn locations for NPCs within the trial arena.
@@ -229,21 +119,18 @@ Stores the perma-death status of characters. This is the authoritative source fo
     *   `HandleTrialConfirmCommand` is the static handler for confirmations. It ensures the player exists, is in a group, and parses "yes" or "no". It then calls `TrialManager::instance()->HandleTrialConfirmation(player, accepted)`.
     *   `HandleTrialForfeitCommand` is the static handler for forfeits. It calls `TrialManager::instance()->HandleTrialForfeit(player)` to process the vote.
 
-## 7. Developer Notes & Future Considerations
+## 6. Developer Notes & Future Considerations
 
 This section includes notes migrated from the main README and additional points for future development.
 
 *   **Perma-Death Mechanism:** The system now uses a database flag (`is_perma_failed` in `character_trial_finality_status`) for persistent perma-death status. This is more robust than the previous aura-only system. The `AURA_ID_TRIAL_PERMADEATH` is largely deprecated for persistence.
 *   **Configurable Creature Pools:** Creature entries for waves are now fully configurable via `mod_trial_of_finality.conf`. Server administrators **must** customize these from the default placeholder IDs to ensure valid and balanced encounters.
-*   **Wave Difficulty Scaling:** Currently, scaling involves adjusting NPC count per wave based on active players and applying a health multiplier for medium/hard waves. Future enhancements could include:
-    *   More granular stat scaling (damage, armor, resistances).
-    *   Applying specific auras or abilities to NPCs based on wave difficulty.
-    *   Scripted events or unique boss-like creatures for certain waves.
+*   **Wave Difficulty Scaling:** The `custom_scaling_rules` mode provides a flexible way to scale difficulty. Health is scaled via a direct multiplier. Damage should be scaled by creating custom passive auras that modify damage done by a percentage and adding their spell IDs to the `AurasToAdd` configuration for the desired tier. This provides a robust and flexible method for damage scaling.
 *   **NPC Randomization:** Randomization of NPC types for waves is achieved by shuffling the configured creature ID pools before selecting creatures for each spawn event, ensuring variety if pools are sufficiently large.
 *   **World Announcements:** This feature is implemented and configurable.
 *   **NPC Cheering - Second Cheer:** This feature is implemented. It uses a vector `m_pendingSecondCheers` in the `TrialManager` and a periodic check in the `OnUpdate` ticker to avoid creating a separate timer for each NPC. When an NPC cheers, if the interval is configured, a struct containing the NPC's GUID and the target cheer time is added to the vector. The `OnUpdate` method processes this vector to trigger the second cheer.
 *   **More Varied Wave Compositions:** Beyond distinct creature types, future iterations could introduce pre-defined "encounter groups" within pools, allowing for specific combinations of roles (e.g., healer + tanks + casters) to be selected as a unit.
-*   **Player-Initiated Forfeit:** Consider adding a command or UI option for a group to unanimously agree to forfeit a trial, perhaps with less severe consequences than a full wipe or boundary violation (e.g., no perma-death but also no rewards).
+*   **Player-Initiated Forfeit:** The current implementation requires a unanimous vote. Future enhancements could allow for a majority vote, configurable via the `.conf` file.
 *   **Arena Boundaries:** This feature is implemented. The `TrialManager::CheckPlayerLocationsAndEnforceBoundaries` function is called periodically by the `OnUpdate` ticker. It verifies that each player in the trial is on the correct `Arena.MapID` and within the `Arena.Radius` distance from the teleport-in coordinates. If a player is found outside the boundary, they receive a warning. If they are found outside the boundary again on a subsequent check, the trial is ended in failure. Future improvements could involve using AreaTriggers for more complex arena shapes instead of a simple radius.
 *   **Advanced Configuration Validation:** While basic parsing and template existence checks are done for NPC pools, more sophisticated validation (e.g., ensuring enough creatures for `NUM_SPAWNS_PER_WAVE` if desired) could be added, possibly with more detailed feedback to the server console on startup.
 

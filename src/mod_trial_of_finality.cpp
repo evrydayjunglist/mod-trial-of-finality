@@ -166,11 +166,11 @@ bool PermaDeathExemptGMs = true; // Exempt GMs from perma-death
 uint32 ConfirmationTimeoutSeconds = 60; // Seconds for players to confirm trial participation
 bool ConfirmationEnable = true; // Enable/disable the confirmation system
 std::string ConfirmationRequiredMode = "all"; // "all", (future: "majority", "leader_plus_one")
+bool ForfeitEnable = true; // Enable/disable the forfeit feature
 
 // --- Custom NPC Scaling Settings ---
 struct CustomNpcScalingTier {
     float HealthMultiplier = 1.0f;
-    float DamageMultiplier = 1.0f;
     std::vector<uint32> AurasToAdd;
 };
 CustomNpcScalingTier CustomScalingEasy;
@@ -878,10 +878,9 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
     // If using custom scaling mode, override the multipliers and get auras
     if (NpcScalingMode == "custom_scaling_rules" && customScalingTier) {
         healthMultiplier = customScalingTier->HealthMultiplier;
-        damageMultiplier = customScalingTier->DamageMultiplier;
         aurasToAdd = &customScalingTier->AurasToAdd;
-        sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Using CUSTOM scaling rules. HealthMult: %.2f, DamageMult: %.2f, Auras: %lu",
-            groupId, currentTrial->currentWave, healthMultiplier, damageMultiplier, (aurasToAdd ? aurasToAdd->size() : 0));
+        sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Using CUSTOM scaling rules. HealthMult: %.2f, Auras: %lu",
+            groupId, currentTrial->currentWave, healthMultiplier, (aurasToAdd ? aurasToAdd->size() : 0));
     }
 
     if (!currentWaveNpcPool || currentWaveNpcPool->empty()) {
@@ -923,15 +922,6 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
             if (healthMultiplier != 1.0f) {
                 creature->SetMaxHealth(uint32(creature->GetMaxHealth() * healthMultiplier));
                 creature->SetHealth(creature->GetMaxHealth());
-            }
-
-            // Apply damage multiplier
-            if (damageMultiplier != 1.0f) {
-                if (const CreatureTemplate* cInfo = creature->GetCreatureTemplate()) {
-                    float newMinDamage = cInfo->dmg_min * damageMultiplier;
-                    float newMaxDamage = cInfo->dmg_max * damageMultiplier;
-                    creature->SetBaseWeaponDamage(BASE_ATTACK, WEAPON_SCHOOL_NORMAL, newMinDamage, newMaxDamage);
-                }
             }
 
             // Apply auras
@@ -1645,6 +1635,9 @@ public:
         }
         sLog->outDetail("[TrialOfFinality] Trial Confirmation Required Mode: %s", ConfirmationRequiredMode.c_str());
 
+        ForfeitEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.Forfeit.Enable", true);
+        sLog->outDetail("[TrialOfFinality] Forfeit System: %s", ForfeitEnable ? "Enabled" : "Disabled");
+
         WorldAnnounceEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.AnnounceWinners.World.Enable", true);
         WorldAnnounceFormat = sConfigMgr->GetOption<std::string>("TrialOfFinality.AnnounceWinners.World.MessageFormat",
             "Hark, heroes! The group led by {group_leader}, with valiant trialists {player_list}, has vanquished all foes and emerged victorious from the Trial of Finality! All hail the Conquerors!");
@@ -1834,15 +1827,12 @@ public:
         // Load Custom Scaling Rules
         sLog->outDetail("[TrialOfFinality] Loading Custom NPC Scaling Rules...");
         CustomScalingEasy.HealthMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Easy.HealthMultiplier", 1.0f);
-        CustomScalingEasy.DamageMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Easy.DamageMultiplier", 1.0f);
         CustomScalingEasy.AurasToAdd = parseAuraIdString(sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Custom.Easy.AurasToAdd", ""), "Easy");
 
         CustomScalingMedium.HealthMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Medium.HealthMultiplier", 1.2f);
-        CustomScalingMedium.DamageMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Medium.DamageMultiplier", 1.2f);
         CustomScalingMedium.AurasToAdd = parseAuraIdString(sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Custom.Medium.AurasToAdd", ""), "Medium");
 
         CustomScalingHard.HealthMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Hard.HealthMultiplier", 1.5f);
-        CustomScalingHard.DamageMultiplier = sConfigMgr->GetOption<float>("TrialOfFinality.NpcScaling.Custom.Hard.DamageMultiplier", 1.5f);
         CustomScalingHard.AurasToAdd = parseAuraIdString(sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Custom.Hard.AurasToAdd", ""), "Hard");
 
         if (!FateweaverArithosEntry || !TrialTokenEntry || !AnnouncerEntry || !TitleRewardID) {
@@ -1970,12 +1960,16 @@ public:
 
     std::vector<ChatCommand> GetCommands() const override
     {
-        static std::vector<ChatCommand> commandTable = {
-            { "trialconfirm", SEC_PLAYER, true, &HandleTrialConfirmCommand, "Confirms or denies participation in the Trial of Finality. Usage: /trialconfirm <yes|no>" },
-            { "tc",           SEC_PLAYER, true, &HandleTrialConfirmCommand, "Alias for /trialconfirm. Usage: /tc <yes|no>" }, // Alias
-            { "trialforfeit", SEC_PLAYER, true, &HandleTrialForfeitCommand, "Votes to forfeit the current Trial of Finality." },
-            { "tf",           SEC_PLAYER, true, &HandleTrialForfeitCommand, "Alias for /trialforfeit." } // Alias
-        };
+        static std::vector<ChatCommand> commandTable;
+
+        if (commandTable.empty()) {
+            commandTable.push_back({ "trialconfirm", SEC_PLAYER, true, &HandleTrialConfirmCommand, "Confirms or denies participation in the Trial of Finality. Usage: /trialconfirm <yes|no>" });
+            commandTable.push_back({ "tc",           SEC_PLAYER, true, &HandleTrialConfirmCommand, "Alias for /trialconfirm. Usage: /tc <yes|no>" });
+            if (ForfeitEnable) {
+                commandTable.push_back({ "trialforfeit", SEC_PLAYER, true, &HandleTrialForfeitCommand, "Votes to forfeit the current Trial of Finality." });
+                commandTable.push_back({ "tf",           SEC_PLAYER, true, &HandleTrialForfeitCommand, "Alias for /trialforfeit." });
+            }
+        }
         return commandTable;
     }
 
@@ -1992,6 +1986,7 @@ public:
             return false;
         }
 
+        sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) is attempting to use /trialforfeit command.", player->GetName().c_str(), player->GetGUID().GetCounter());
         TrialManager::instance()->HandleTrialForfeit(player);
         return true;
     }
