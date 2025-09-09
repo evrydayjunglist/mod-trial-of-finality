@@ -54,6 +54,7 @@ This guide provides a detailed explanation of all configuration options availabl
     *   Health multiplier and auras for Hard tier NPCs (Wave 5).
 
 ## NPC Wave Creature Pools
+
 These settings define the pools of creatures that can be spawned for each wave difficulty tier. The module now supports **Encounter Groups**, allowing you to define sets of NPCs that will always spawn together.
 
 ### Syntax

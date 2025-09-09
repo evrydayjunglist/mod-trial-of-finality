@@ -23,6 +23,7 @@ This guide details the gameplay mechanics of the Trial of Finality.
 ## During the Trial
 *   Upon starting, all group members receive a **Trial Token**, have XP gain disabled, and are teleported to the designated arena.
 *   The **Trial Announcer** will provide commentary and announce incoming waves.
+
 *   There are 5 waves of NPCs. Waves are composed of "Encounter Groups" randomly selected from pools defined in the configuration. This means some waves might feature single, powerful enemies, while others might have groups of weaker enemies that spawn together.
 *   The number of Encounter Groups spawned per wave scales with the number of active (not perma-deathed) players.
 *   Creature levels match the highest level in the group at trial start. Later waves feature health-boosted NPCs.

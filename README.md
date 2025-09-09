@@ -1,3 +1,6 @@
+
+# - WORK IN PROGRESS -
+
 # AzerothCore Module: Trial of Finality (`mod-trial-of-finality`)
 
 ## 1. Overview
@@ -11,7 +14,7 @@
 *   A **Perma-Death** mechanic for ultimate risk.
 *   **Combat Resurrection** to save teammates from perma-death.
 *   A **Player-Initiated Forfeit** system (`/trialforfeit`) for a graceful exit.
-*   Dynamic waves with **Varied Compositions**, allowing admins to create encounter groups that spawn together.
+*   Dynamic waves that scale with group size.
 *   Advanced, configurable NPC scaling (health, damage, auras).
 *   Configurable rewards (gold and a unique title).
 *   GM commands for testing and administration.
