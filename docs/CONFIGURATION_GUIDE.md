@@ -17,8 +17,8 @@ This guide provides a detailed explanation of all configuration options availabl
 ## Rewards
 *   **`TrialOfFinality.TitleReward.ID`**: (uint32, default: `0` - example `100`)
     *   The ID of the character title (from `CharTitles.dbc`) awarded to players who successfully complete the trial.
-*   **`TrialOfFinality.GoldReward`**: (uint32, default: `20000`)
-    *   Amount of gold (in copper coins, so `20000` is 2 gold) awarded to each eligible surviving member upon successful completion.
+*   **`TrialOfFinality.GoldReward`**: (uint32, default: `200000000`)
+    *   Amount of gold (in copper coins, so `200000000` is 20,000 gold) awarded to each eligible surviving member upon successful completion.
 
 ## Gameplay Rules
 *   **`TrialOfFinality.MinGroupSize`**: (uint8, default: `1`)
