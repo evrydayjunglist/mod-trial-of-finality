@@ -20,6 +20,7 @@
 *   Custom **Trial Announcer** NPC for flavor dialogue and wave announcements.
 *   **Perma-Death Mechanic:** Dying with the Trial Token and not being resurrected before the current wave ends results in permanent character disablement (via database flag).
 *   **Combat Resurrection:** Players can be resurrected by teammates during a wave to avoid perma-death for that specific death event.
+*   **Player-Initiated Forfeit:** A unanimous vote-to-forfeit system (`/trialforfeit`) allows groups to gracefully exit a trial without penalty.
 *   **Rewards:** Significant gold and a custom title for successful completion.
 *   Detailed logging of trial events to a database table (`trial_of_finality_log`).
 *   GM debug commands for resetting player status and testing the trial.
@@ -59,7 +60,8 @@ The module is configured via `mod_trial_of_finality.conf`. Below are the most co
 *   **Arena Location:**
     *   `TrialOfFinality.Arena.MapID`, `TrialOfFinality.Arena.TeleportX/Y/Z/O`: Define the trial arena map and teleport coordinates. Adjust these to your desired arena location.
 *   **NPC Customization (Crucial for Admins):**
-    *   `TrialOfFinality.NpcPools.Easy`, `TrialOfFinality.NpcPools.Medium`, `TrialOfFinality.NpcPools.Hard`: Comma-separated lists of creature entry IDs for trial waves. **Crucial: Customize these with valid creature IDs from your database.** Example: `"123,456,789"`. See the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md) for more details on NPC scaling and pool configuration.
+    *   `TrialOfFinality.NpcPools.Easy`, `TrialOfFinality.NpcPools.Medium`, `TrialOfFinality.NpcPools.Hard`: Comma-separated lists of creature entry IDs for trial waves. **Crucial: Customize these with valid creature IDs from your database.** Example: `"123,456,789"`.
+    *   *Advanced Scaling:* The module also supports a custom scaling mode for finer control over NPC health, damage, and auras. See the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md) for details on enabling and configuring `custom_scaling_rules`.
 *   **Perma-Death Options:**
     *   `TrialOfFinality.PermaDeath.ExemptGMs`: If `true` (default), Game Master accounts are not permanently affected by trial failure.
     *   *Note:* Perma-death status is stored in the `character_trial_finality_status` database table. The old `DisableCharacter.Method` config option and direct reliance on `AURA_ID_TRIAL_PERMADEATH` (40000) are now primarily historical/secondary. See the [Developer Guide](https://github.com/Stuntmonkey4u/mod-trial-of-finality/blob/main/docs/DEVELOPER_GUIDE.md) for full details.
@@ -131,6 +133,7 @@ Access to commands requires `SEC_GAMEMASTER` level.
 ### Player Commands
 *   `/trialconfirm yes` (or `/tc yes`): Confirms your participation if a Trial of Finality has been proposed for your group.
 *   `/trialconfirm no` (or `/tc no`): Declines participation if a Trial of Finality has been proposed. This will typically abort the trial initiation for the group.
+*   `/trialforfeit` (or `/tf`): Initiates a vote to forfeit the trial. If all active members vote to forfeit, the trial ends gracefully with no perma-death penalties.
 
 ## 7. Logging
 

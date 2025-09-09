@@ -80,8 +80,20 @@ The following provides a detailed explanation of all configuration options avail
 
 *   **`TrialOfFinality.NpcScaling.Mode`**: (string, default: `"match_highest_level"`)
     *   Defines how NPC levels are determined.
-    *   `"match_highest_level"`: All NPCs in the trial will be scaled to the level of the highest-level player in the group at the moment the trial started.
-    *   `"custom_scaling_rules"`: Placeholder for a future, more complex scaling system (not currently implemented).
+    *   `"match_highest_level"`: The default mode. NPC levels match the highest level in the group. Health is boosted by a hardcoded multiplier for Medium (+20%) and Hard (+50%) waves.
+    *   `"custom_scaling_rules"`: Enables the custom scaling rules below, allowing for finer control over NPC difficulty.
+*   **`TrialOfFinality.NpcScaling.Custom.Easy.HealthMultiplier`**: (float, default: `1.0`)
+*   **`TrialOfFinality.NpcScaling.Custom.Easy.DamageMultiplier`**: (float, default: `1.0`)
+*   **`TrialOfFinality.NpcScaling.Custom.Easy.AurasToAdd`**: (string, default: `""`)
+    *   Health and damage multipliers for Easy tier NPCs (Waves 1-2). `AurasToAdd` is a comma-separated list of spell IDs to apply to the NPCs.
+*   **`TrialOfFinality.NpcScaling.Custom.Medium.HealthMultiplier`**: (float, default: `1.2`)
+*   **`TrialOfFinality.NpcScaling.Custom.Medium.DamageMultiplier`**: (float, default: `1.2`)
+*   **`TrialOfFinality.NpcScaling.Custom.Medium.AurasToAdd`**: (string, default: `""`)
+    *   Multipliers and auras for Medium tier NPCs (Waves 3-4).
+*   **`TrialOfFinality.NpcScaling.Custom.Hard.HealthMultiplier`**: (float, default: `1.5`)
+*   **`TrialOfFinality.NpcScaling.Custom.Hard.DamageMultiplier`**: (float, default: `1.5`)
+*   **`TrialOfFinality.NpcScaling.Custom.Hard.AurasToAdd`**: (string, default: `""`)
+    *   Multipliers and auras for Hard tier NPCs (Wave 5).
 *   **`TrialOfFinality.DisableCharacter.Method`**: (string, default: `"custom_flag"`)
     *   This option is largely informational due to the implementation of a database-driven perma-death system.
     *   Historically, `"custom_flag"` referred to using `AURA_ID_TRIAL_PERMADEATH` (40000) for perma-death. The primary mechanism is now the `is_perma_failed` flag in the `character_trial_finality_status` table.
@@ -194,6 +206,11 @@ Stores the perma-death status of characters. This is the authoritative source fo
     *   It selects `guid` and `zoneId` for creatures matching the configured zone IDs and NPC flag criteria (target/exclude flags), and are not player-controlled.
     *   These `ObjectGuid`s are stored in `ModServerScript::s_cheeringNpcCacheByZone`, a `std::map<uint32, std::vector<ObjectGuid>>`.
     *   When `TrialManager::TriggerCityNpcCheers` is called, it iterates through online players. For players in configured cheer zones, it retrieves the cached NPC GUIDs for that zone, checks proximity, and makes them emote.
+*   **Player-Initiated Forfeit System:**
+    *   **`/trialforfeit` (alias `/tf`):** This new player command allows members of a group in an active trial to vote to forfeit.
+    *   **`TrialManager::HandleTrialForfeit`**: When the first player in a trial types the command, a vote is initiated. A 30-second timer starts, and all group members are notified. Other active (alive) players must also type `/trialforfeit` to agree.
+    *   **Vote Resolution:** The vote succeeds only if all currently active players in the trial type the command before the timer expires. If successful, the trial ends gracefully by calling `CleanupTrial` directly, which means no perma-death penalties are applied. If the timer expires, the vote is cancelled, and the trial continues.
+    *   **State Management:** The voting state (whether a vote is in progress, its start time, and who has voted) is managed by new variables in the `ActiveTrialInfo` struct. The timeout is handled by a check in `TrialManager::OnUpdate`.
 *   **NPC Spawning (`TrialManager::SpawnActualWave`):**
     *   The correct NPC pool (`NpcPoolEasy`, `NpcPoolMedium`, `NpcPoolHard`) is selected based on the current wave number.
     *   If the selected pool is empty (due to misconfiguration or all IDs being invalid), the trial is ended with an error.
@@ -208,8 +225,9 @@ Stores the perma-death status of characters. This is the authoritative source fo
 *   **`NUM_SPAWNS_PER_WAVE (5)`:** A constant defining the maximum number of NPCs that can be spawned per wave if enough players are present and the selected NPC pool has enough variety. The actual number can be lower.
 *   **`TrialEventType` (enum):** Defines the types of events logged to the `trial_of_finality_log` table (see Section 4, Database Schema).
 *   **Player Chat Commands:**
-    *   The `trial_player_commandscript` class registers `/trialconfirm` (alias `/tc`) with `SEC_PLAYER` permissions.
-    *   `HandleTrialConfirmCommand` is the static handler. It ensures the player exists, is in a group, and parses "yes" or "no". It then calls `TrialManager::instance()->HandleTrialConfirmation(player, accepted)`.
+    *   The `trial_player_commandscript` class registers two primary commands with `SEC_PLAYER` permissions: `/trialconfirm` (alias `/tc`) and `/trialforfeit` (alias `/tf`).
+    *   `HandleTrialConfirmCommand` is the static handler for confirmations. It ensures the player exists, is in a group, and parses "yes" or "no". It then calls `TrialManager::instance()->HandleTrialConfirmation(player, accepted)`.
+    *   `HandleTrialForfeitCommand` is the static handler for forfeits. It calls `TrialManager::instance()->HandleTrialForfeit(player)` to process the vote.
 
 ## 7. Developer Notes & Future Considerations
 
@@ -223,7 +241,7 @@ This section includes notes migrated from the main README and additional points 
     *   Scripted events or unique boss-like creatures for certain waves.
 *   **NPC Randomization:** Randomization of NPC types for waves is achieved by shuffling the configured creature ID pools before selecting creatures for each spawn event, ensuring variety if pools are sufficiently large.
 *   **World Announcements:** This feature is implemented and configurable.
-*   **NPC Cheering - Second Cheer:** The configuration for a second cheer interval (`CheeringNpcs.CheerIntervalMs`) exists, and the intent is logged. However, the actual delayed execution of the second cheer is not yet implemented due to complexities with managing timers for potentially many NPCs without direct AI contexts. This requires further investigation into suitable core mechanisms or a custom scheduler.
+*   **NPC Cheering - Second Cheer:** This feature is implemented. It uses a vector `m_pendingSecondCheers` in the `TrialManager` and a periodic check in the `OnUpdate` ticker to avoid creating a separate timer for each NPC. When an NPC cheers, if the interval is configured, a struct containing the NPC's GUID and the target cheer time is added to the vector. The `OnUpdate` method processes this vector to trigger the second cheer.
 *   **More Varied Wave Compositions:** Beyond distinct creature types, future iterations could introduce pre-defined "encounter groups" within pools, allowing for specific combinations of roles (e.g., healer + tanks + casters) to be selected as a unit.
 *   **Player-Initiated Forfeit:** Consider adding a command or UI option for a group to unanimously agree to forfeit a trial, perhaps with less severe consequences than a full wipe or boundary violation (e.g., no perma-death but also no rewards).
 *   **Arena Boundaries:** This feature is implemented. The `TrialManager::CheckPlayerLocationsAndEnforceBoundaries` function is called periodically by the `OnUpdate` ticker. It verifies that each player in the trial is on the correct `Arena.MapID` and within the `Arena.Radius` distance from the teleport-in coordinates. If a player is found outside the boundary, they receive a warning. If they are found outside the boundary again on a subsequent check, the trial is ended in failure. Future improvements could involve using AreaTriggers for more complex arena shapes instead of a simple radius.
