@@ -41,8 +41,7 @@ This guide details the gameplay mechanics of the Trial of Finality.
 
 ## Forfeiting the Trial
 *   At any point during the trial, players can use the `/trialforfeit` or `/tf` command.
-*   This initiates a vote among all active (alive and not perma-deathed) members. If all active members vote to forfeit, the trial ends gracefully with no perma-death penalties.
-*   If you are the last active player remaining, using `/trialforfeit` will end the trial immediately without requiring a vote.
+*   This initiates a vote among all active (alive and not perma-deathed) members. If all active members vote to forfeit, the trial ends gracefully with no perma-death penalties. A vote is only possible when two or more players are active in the trial.
 
 ## Trial Failure
 *   Failure occurs on a group wipe, if all players are perma-deathed, or due to critical errors (e.g., misconfigured NPC pools).

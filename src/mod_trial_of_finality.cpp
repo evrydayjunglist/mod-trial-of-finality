@@ -374,49 +374,6 @@ void TrialManager::AbortPendingTrial(uint32 groupId, const std::string& reason, 
             }
         }
     }
-
-    // --- Second Cheer Check ---
-    m_lastCheerCheck += diff;
-    if (m_lastCheerCheck >= 1000) { // Check every second
-        m_lastCheerCheck = 0;
-
-        if (!m_pendingSecondCheers.empty()) {
-            time_t now = time(nullptr);
-            auto it = m_pendingSecondCheers.begin();
-            while (it != m_pendingSecondCheers.end()) {
-                if (now >= it->cheerTime) {
-                    if (Creature* npc = ObjectAccessor::GetCreature(*sWorld, it->npcGuid)) {
-                        if (npc->IsAlive() && !npc->IsInCombat()) {
-                            npc->HandleEmoteCommand(EMOTE_ONESHOT_CHEER);
-                        }
-                    }
-                    it = m_pendingSecondCheers.erase(it);
-                } else {
-                    ++it;
-                }
-            }
-        }
-    }
-
-    // --- Forfeit Vote Timeout Check ---
-    // This check runs on every TrialManager update tick. A dedicated timer could also be used.
-    if (!m_activeTrials.empty()) {
-        time_t now = time(nullptr);
-        for (auto itr = m_activeTrials.begin(); itr != m_activeTrials.end(); ++itr) {
-            ActiveTrialInfo* trialInfo = &itr->second;
-            if (trialInfo->forfeitVoteInProgress && (now - trialInfo->forfeitVoteStartTime > 30)) {
-                trialInfo->forfeitVoteInProgress = false;
-                trialInfo->playersWhoVotedForfeit.clear();
-                std::string msg = "The vote to forfeit the trial has failed to pass in time and is now cancelled.";
-                LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, itr->first, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Vote timed out.");
-                for (const auto& memberGuid : trialInfo->memberGuids) {
-                     if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
-                        if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
-                    }
-                }
-            }
-        }
-    }
 }
 
 void TrialManager::HandleTrialForfeit(Player* player) {
@@ -432,36 +389,21 @@ void TrialManager::HandleTrialForfeit(Player* player) {
         return;
     }
 
-    // Count active (online and alive) players to check for last-player-standing scenario
+    // Count active players
     uint32 activePlayers = 0;
-    Player* lastPlayer = nullptr;
     for (const auto& memberGuid : trialInfo->memberGuids) {
         if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
             if (Player* p = ObjectAccessor::FindPlayer(memberGuid)) {
                 if (p->GetSession() && p->IsAlive()) {
                     activePlayers++;
-                    lastPlayer = p;
                 }
             }
         }
     }
 
-    // If the person using the command is the last one left alive, they can forfeit instantly.
-    if (activePlayers == 1 && lastPlayer && lastPlayer->GetGUID() == player->GetGUID()) {
-        std::string reason = player->GetName() + " was the last survivor and has chosen to forfeit the trial.";
-        sLog->outInfo("sys", "[TrialOfFinality] Group %u trial forfeited by last survivor %s.", groupId, player->GetName().c_str());
-        LogTrialDbEvent(TRIAL_EVENT_PLAYER_FORFEIT_ARENA, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
-
-        for (const auto& memberGuid : trialInfo->memberGuids) {
-            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
-                if (member->GetSession()) {
-                     ChatHandler(member->GetSession()).SendSysMessage(reason);
-                }
-            }
-        }
-
-        // A forfeit does not trigger permadeath, it's a graceful exit.
-        CleanupTrial(groupId, false);
+    // Prevent solo forfeit, addressing user feedback about potential exploits.
+    if (activePlayers <= 1) {
+        ChatHandler(player->GetSession()).SendSysMessage("You cannot forfeit the trial alone. You must see it through to the end!");
         return;
     }
 
@@ -471,28 +413,12 @@ void TrialManager::HandleTrialForfeit(Player* player) {
         return;
     }
 
-    // Re-check active players for voting threshold, as it might have changed.
-    uint32 votingThreshold = 0;
-    for (const auto& memberGuid : trialInfo->memberGuids) {
-        if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
-            Player* p = ObjectAccessor::FindPlayer(memberGuid);
-            if (p && p->GetSession() && p->IsAlive()) {
-                votingThreshold++;
-            }
-        }
-    }
-
-    if (votingThreshold <= 1) {
-        ChatHandler(player->GetSession()).SendSysMessage("There are not enough active players to hold a vote.");
-        return;
-    }
-
     if (!trialInfo->forfeitVoteInProgress) {
         trialInfo->forfeitVoteInProgress = true;
         trialInfo->forfeitVoteStartTime = time(nullptr);
         trialInfo->playersWhoVotedForfeit.insert(player->GetGUID());
 
-        std::string msg = player->GetName() + " has initiated a vote to forfeit the Trial of Finality! All other active members must type `/trialforfeit` within 30 seconds to agree. (1/" + std::to_string(votingThreshold) + " votes)";
+        std::string msg = player->GetName() + " has initiated a vote to forfeit the Trial of Finality! All other active members must type `/trialforfeit` within 30 seconds to agree. (1/" + std::to_string(activePlayers) + " votes)";
         LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_START, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Forfeit vote started.");
 
         for (const auto& memberGuid : trialInfo->memberGuids) {
@@ -502,7 +428,7 @@ void TrialManager::HandleTrialForfeit(Player* player) {
         }
     } else {
         trialInfo->playersWhoVotedForfeit.insert(player->GetGUID());
-        std::string msg = player->GetName() + " has also voted to forfeit. (" + std::to_string(trialInfo->playersWhoVotedForfeit.size()) + "/" + std::to_string(votingThreshold) + " votes)";
+        std::string msg = player->GetName() + " has also voted to forfeit. (" + std::to_string(trialInfo->playersWhoVotedForfeit.size()) + "/" + std::to_string(activePlayers) + " votes)";
 
         for (const auto& memberGuid : trialInfo->memberGuids) {
             if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
@@ -512,10 +438,9 @@ void TrialManager::HandleTrialForfeit(Player* player) {
     }
 
     // Check if all active players have voted
-    if (trialInfo->playersWhoVotedForfeit.size() >= votingThreshold) {
+    if (trialInfo->playersWhoVotedForfeit.size() >= activePlayers) {
         std::string reason = "The group has unanimously voted to forfeit the trial.";
         LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_SUCCESS, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
-        // A forfeit does not trigger permadeath, it's a graceful exit.
         CleanupTrial(groupId, false);
     }
 }
@@ -590,17 +515,14 @@ void TrialManager::OnUpdate(uint32 diff) {
     m_lastPendingCheck += diff;
     if (m_lastPendingCheck >= 2000) { // Check every 2 seconds
         m_lastPendingCheck = 0;
-
         if (!m_pendingTrials.empty()) {
             time_t now = time(nullptr);
             std::vector<uint32> timedOutGroupIds;
-
             for (const auto& pair : m_pendingTrials) {
                 if (now - pair.second.creationTime > ConfirmationTimeoutSeconds) {
                     timedOutGroupIds.push_back(pair.first);
                 }
             }
-
             for (uint32 groupId : timedOutGroupIds) {
                 AbortPendingTrial(groupId, "The confirmation request timed out.");
             }
@@ -611,17 +533,78 @@ void TrialManager::OnUpdate(uint32 diff) {
     m_lastBoundaryCheck += diff;
     if (m_lastBoundaryCheck >= 5000) { // Check every 5 seconds
         m_lastBoundaryCheck = 0;
-
         if (!m_activeTrials.empty()) {
-            // Create a copy of keys because CheckPlayerLocationsAndEnforceBoundaries can modify m_activeTrials, invalidating iterators
             std::vector<uint32> groupIds;
-            for(auto const& [key, val] : m_activeTrials) {
-                groupIds.push_back(key);
-            }
+            for(auto const& [key, val] : m_activeTrials) { groupIds.push_back(key); }
             for (uint32 groupId : groupIds) {
-                // Check if trial still exists before running check
-                if(GetActiveTrialInfo(groupId)) {
-                    CheckPlayerLocationsAndEnforceBoundaries(groupId);
+                if(GetActiveTrialInfo(groupId)) { CheckPlayerLocationsAndEnforceBoundaries(groupId); }
+            }
+        }
+    }
+
+    // --- Active Trial Forfeit & Cheer Checks ---
+    m_lastCheerCheck += diff;
+    if (m_lastCheerCheck >= 1000) { // Check every second
+        m_lastCheerCheck = 0;
+        time_t now = time(nullptr);
+
+        // Second Cheer
+        if (!m_pendingSecondCheers.empty()) {
+            auto it = m_pendingSecondCheers.begin();
+            while (it != m_pendingSecondCheers.end()) {
+                if (now >= it->cheerTime) {
+                    if (Creature* npc = ObjectAccessor::GetCreature(*sWorld, it->npcGuid)) {
+                        if (npc->IsAlive() && !npc->IsInCombat()) { npc->HandleEmoteCommand(EMOTE_ONESHOT_CHEER); }
+                    }
+                    it = m_pendingSecondCheers.erase(it);
+                } else { ++it; }
+            }
+        }
+
+        // Forfeit Vote Checks
+        if (!m_activeTrials.empty()) {
+            // Create a copy of keys because the vote cancellation logic can modify m_activeTrials, invalidating iterators
+            std::vector<uint32> groupIds;
+            for(auto const& [key, val] : m_activeTrials) { groupIds.push_back(key); }
+
+            for (uint32 groupId : groupIds) {
+                ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
+                if (!trialInfo || !trialInfo->forfeitVoteInProgress) {
+                    continue;
+                }
+
+                // Timeout Check
+                if (now - trialInfo->forfeitVoteStartTime > 30) {
+                    trialInfo->forfeitVoteInProgress = false;
+                    trialInfo->playersWhoVotedForfeit.clear();
+                    std::string msg = "The vote to forfeit the trial has failed to pass in time and is now cancelled.";
+                    LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Vote timed out.");
+                    for (const auto& memberGuid : trialInfo->memberGuids) {
+                        if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
+                            if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
+                        }
+                    }
+                } else { // Only do this check if not timed out
+                    // Active player count check to prevent solo forfeit exploit
+                    uint32 activePlayers = 0;
+                    for (const auto& guid : trialInfo->memberGuids) {
+                        if (!trialInfo->permanentlyFailedPlayerGuids.count(guid)) {
+                            if (Player* p = ObjectAccessor::FindPlayer(guid)) {
+                                if (p->GetSession() && p->IsAlive()) activePlayers++;
+                            }
+                        }
+                    }
+                    if (activePlayers < 2) {
+                        trialInfo->forfeitVoteInProgress = false;
+                        trialInfo->playersWhoVotedForfeit.clear();
+                        std::string msg = "The vote to forfeit was cancelled because there are no longer enough active players to vote.";
+                        LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Not enough active players.");
+                        for (const auto& memberGuid : trialInfo->memberGuids) {
+                            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
+                                if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
+                            }
+                        }
+                    }
                 }
             }
         }

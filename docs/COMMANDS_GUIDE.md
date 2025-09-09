@@ -17,4 +17,3 @@ Access to commands requires `SEC_GAMEMASTER` level.
 *   `/trialconfirm yes` (or `/tc yes`): Confirms your participation if a Trial of Finality has been proposed for your group.
 *   `/trialconfirm no` (or `/tc no`): Declines participation if a Trial of Finality has been proposed. This will typically abort the trial initiation for the group.
 *   `/trialforfeit` (or `/tf`): Initiates a vote to forfeit the trial. If all active members vote to forfeit, the trial ends gracefully with no perma-death penalties.
-    *   **Solo Forfeit**: If you are the last active player remaining in the trial, using this command will forfeit the trial instantly, without requiring a vote.
