@@ -125,13 +125,8 @@ std::vector<std::vector<uint32>> NpcPoolEasy;
 std::vector<std::vector<uint32>> NpcPoolMedium;
 std::vector<std::vector<uint32>> NpcPoolHard;
 
-// --- Wave Spawn Positions ---
-const Position WAVE_SPAWN_POSITIONS[5] = {
-    {-13230.0f, 180.0f, 30.5f, 1.57f}, {-13218.0f, 180.0f, 30.5f, 1.57f},
-    {-13235.0f, 196.0f, 30.5f, 3.14f}, {-13213.0f, 196.0f, 30.5f, 3.14f},
-    {-13224.0f, 210.0f, 30.5f, 4.71f}
-};
-const uint32 NUM_SPAWNS_PER_WAVE = 5;
+// --- Wave Spawn Positions (Now loaded from config) ---
+std::vector<Position> WAVE_SPAWN_POSITIONS;
 
 // --- Configuration Variables ---
 const uint32 AURA_ID_TRIAL_PERMADEATH = 40000;
@@ -150,6 +145,12 @@ float ArenaTeleportY = 0.0f;
 float ArenaTeleportZ = 0.0f;
 float ArenaTeleportO = 0.0f;
 float ArenaRadius = 100.0f;
+bool ExitOverrideHearthstone = false;
+uint16 ExitMapID = 0;
+float ExitTeleportX = 0.0f;
+float ExitTeleportY = 0.0f;
+float ExitTeleportZ = 0.0f;
+float ExitTeleportO = 0.0f;
 std::string NpcScalingMode = "match_highest_level";
 std::string DisableCharacterMethod = "custom_flag";
 bool GMDebugEnable = false;
@@ -1011,7 +1012,14 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
         return;
     }
 
-    uint32 numGroupsToSpawn = std::min((uint32)NUM_SPAWNS_PER_WAVE, activePlayers + 1);
+    if (WAVE_SPAWN_POSITIONS.empty()) {
+        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Cannot spawn wave. No spawn positions are configured or loaded. Check Arena.SpawnPositions in the .conf file.", groupId, currentTrial->currentWave);
+        FinalizeTrialOutcome(groupId, false, "Internal error: No spawn positions configured.");
+        return;
+    }
+    uint32 numSpawnsPerWave = WAVE_SPAWN_POSITIONS.size();
+
+    uint32 numGroupsToSpawn = std::min((uint32)numSpawnsPerWave, activePlayers + 1);
     numGroupsToSpawn = std::max(numGroupsToSpawn, 1u);
 
     if (numGroupsToSpawn > currentWaveNpcPool->size()) {
@@ -1035,8 +1043,8 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
 
     for (uint32 i = 0; i < numGroupsToSpawn; ++i) {
         const std::vector<uint32>& groupOfNpcs = selectedGroups[i];
-        if (spawnPosIndex + groupOfNpcs.size() > NUM_SPAWNS_PER_WAVE) {
-            sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Encounter group with %lu members exceeds remaining spawn points (%u). Skipping group.", groupId, currentTrial->currentWave, groupOfNpcs.size(), NUM_SPAWNS_PER_WAVE - spawnPosIndex);
+        if (spawnPosIndex + groupOfNpcs.size() > numSpawnsPerWave) {
+            sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Encounter group with %lu members exceeds remaining spawn points (%u). Skipping group.", groupId, currentTrial->currentWave, groupOfNpcs.size(), numSpawnsPerWave - spawnPosIndex);
             continue;
         }
 
@@ -1251,7 +1259,11 @@ void TrialManager::CleanupTrial(uint32 groupId, bool success) {
             // Teleport out survivors (those not permanently failed)
             if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
                  ChatHandler(member->GetSession()).SendSysMessage("The Trial of Finality has concluded. You are being teleported out.");
-                 member->TeleportTo(member->GetBindPoint());
+                 if (ExitOverrideHearthstone) {
+                     member->TeleportTo(ExitMapID, ExitTeleportX, ExitTeleportY, ExitTeleportZ, ExitTeleportO);
+                 } else {
+                     member->TeleportTo(member->GetBindPoint());
+                 }
             }
         }
     }
@@ -1746,6 +1758,43 @@ public:
         ArenaTeleportZ = sConfigMgr->GetOption<float>("TrialOfFinality.Arena.TeleportZ", 0.0f);
         ArenaTeleportO = sConfigMgr->GetOption<float>("TrialOfFinality.Arena.TeleportO", 0.0f);
         ArenaRadius = sConfigMgr->GetOption<float>("TrialOfFinality.Arena.Radius", 100.0f);
+
+        // Parse Spawn Positions
+        WAVE_SPAWN_POSITIONS.clear();
+        std::string spawnPosStr = sConfigMgr->GetOption<std::string>("TrialOfFinality.Arena.SpawnPositions", "");
+        if (!spawnPosStr.empty()) {
+            std::stringstream ssPos(spawnPosStr);
+            std::string segment;
+            while(std::getline(ssPos, segment, ';')) {
+                std::stringstream ssCoord(segment);
+                std::string coord;
+                std::vector<float> coords;
+                try {
+                    while(std::getline(ssCoord, coord, ',')) {
+                        coords.push_back(std::stof(coord));
+                    }
+                    if (coords.size() == 4) {
+                        WAVE_SPAWN_POSITIONS.push_back({coords[0], coords[1], coords[2], coords[3]});
+                    } else {
+                        sLog->outError("sys", "[TrialOfFinality] Invalid coordinate segment in Arena.SpawnPositions: '%s'. It must have exactly 4 comma-separated floats (X,Y,Z,O).", segment.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    sLog->outError("sys", "[TrialOfFinality] Failed to parse coordinate segment in Arena.SpawnPositions: '%s'. Error: %s.", segment.c_str(), e.what());
+                }
+            }
+        }
+        if (WAVE_SPAWN_POSITIONS.empty()) {
+             sLog->outError("sys", "[TrialOfFinality] Configuration for Arena.SpawnPositions is empty or invalid. The trial may not function correctly. Please provide at least one valid spawn position.");
+        } else {
+             sLog->outDetail("[TrialOfFinality] Loaded %lu spawn positions.", WAVE_SPAWN_POSITIONS.size());
+        }
+
+        ExitOverrideHearthstone = sConfigMgr->GetOption<bool>("TrialOfFinality.Exit.OverrideHearthstone", false);
+        ExitMapID = sConfigMgr->GetOption<uint16>("TrialOfFinality.Exit.MapID", 0);
+        ExitTeleportX = sConfigMgr->GetOption<float>("TrialOfFinality.Exit.TeleportX", 0.0f);
+        ExitTeleportY = sConfigMgr->GetOption<float>("TrialOfFinality.Exit.TeleportY", 0.0f);
+        ExitTeleportZ = sConfigMgr->GetOption<float>("TrialOfFinality.Exit.TeleportZ", 0.0f);
+        ExitTeleportO = sConfigMgr->GetOption<float>("TrialOfFinality.Exit.TeleportO", 0.0f);
         NpcScalingMode = sConfigMgr->GetOption<std::string>("TrialOfFinality.NpcScaling.Mode", "match_highest_level");
         DisableCharacterMethod = sConfigMgr->GetOption<std::string>("TrialOfFinality.DisableCharacter.Method", "custom_flag");
         GMDebugEnable = sConfigMgr->GetOption<bool>("TrialOfFinality.GMDebug.Enable", false);
