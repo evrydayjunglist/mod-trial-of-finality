@@ -1,0 +1,1 @@
+/usr/bin/c++ -fPIC -shared  -o bin/modules/mod_trial_of_finality.so CMakeFiles/mod_trial_of_finality.dir/src/mod_trial_of_finality.cpp.o  -lgame -lshared

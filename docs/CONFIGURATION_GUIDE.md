@@ -124,3 +124,5 @@ Invalid entries or formatting errors are logged, and the invalid group or entry 
     *   This is an informational setting. The perma-death system is now database-driven.
 *   **`TrialOfFinality.GMDebug.Enable`**: (boolean, default: `false`)
     *   Enables verbose debug logging.
+*   **`TrialOfFinality.GMDebug.AllowPlayerbots`**: (boolean, default: `false`)
+    *   If `true`, allows groups led by a GM account to enter the trial with playerbots. This is intended for testing purposes.
