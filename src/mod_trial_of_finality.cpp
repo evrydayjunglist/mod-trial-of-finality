@@ -32,7 +32,6 @@
 #include "ObjectAccessor.h"
 #include "Player.h"
 #include "DBCStores.h"
-#include "CharTitles.h"
 #include "DatabaseEnv.h"
 #include "ObjectGuid.h"
 
