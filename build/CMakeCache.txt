@@ -148,7 +148,7 @@ CMAKE_PROJECT_DESCRIPTION:STATIC=
 CMAKE_PROJECT_HOMEPAGE_URL:STATIC=
 
 //Value Computed by CMake
-CMAKE_PROJECT_NAME:STATIC=Project
+CMAKE_PROJECT_NAME:STATIC=mod_trial_of_finality
 
 //Path to a program.
 CMAKE_RANLIB:FILEPATH=/usr/bin/ranlib
@@ -216,16 +216,16 @@ CMAKE_TAPI:FILEPATH=CMAKE_TAPI-NOTFOUND
 CMAKE_VERBOSE_MAKEFILE:BOOL=FALSE
 
 //Value Computed by CMake
-Project_BINARY_DIR:STATIC=/app/build
+mod_trial_of_finality_BINARY_DIR:STATIC=/app/build
 
 //Value Computed by CMake
-Project_IS_TOP_LEVEL:STATIC=ON
-
-//Value Computed by CMake
-Project_SOURCE_DIR:STATIC=/app
+mod_trial_of_finality_IS_TOP_LEVEL:STATIC=ON
 
 //Dependencies for the target
 mod_trial_of_finality_LIB_DEPENDS:STATIC=general;game;general;shared;
+
+//Value Computed by CMake
+mod_trial_of_finality_SOURCE_DIR:STATIC=/app
 
 
 ########################
