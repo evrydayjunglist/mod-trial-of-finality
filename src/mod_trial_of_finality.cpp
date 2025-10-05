@@ -82,6 +82,9 @@ void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* playe
         case TRIAL_EVENT_PLAYER_FORFEIT_ARENA: eventTypeStr = "PLAYER_FORFEIT_ARENA"; break;
         case TRIAL_EVENT_WORLD_ANNOUNCEMENT_SUCCESS: eventTypeStr = "WORLD_ANNOUNCEMENT_SUCCESS"; break;
         case TRIAL_EVENT_NPC_CHEER_TRIGGERED: eventTypeStr = "NPC_CHEER_TRIGGERED"; break;
+        case TRIAL_EVENT_FORFEIT_VOTE_START: eventTypeStr = "FORFEIT_VOTE_START"; break;
+        case TRIAL_EVENT_FORFEIT_VOTE_CANCEL: eventTypeStr = "FORFEIT_VOTE_CANCEL"; break;
+        case TRIAL_EVENT_FORFEIT_VOTE_SUCCESS: eventTypeStr = "FORFEIT_VOTE_SUCCESS"; break;
     }
 
     ObjectGuid playerGuid = player ? player->GetGUID() : ObjectGuid::Empty;
@@ -97,7 +100,7 @@ void LogTrialDbEvent(TrialEventType eventType, uint32 groupId = 0, Player* playe
             << ", HighestLvl: " << (unsigned int)highestLevel
             << ", Wave: " << waveNumber
             << ", Details: '" << details << "'";
-    sLog->outMessage("sys", "%s", slog_message.str().c_str());
+    sLog->outMessage("sys", LOG_LEVEL_INFO, "%s", slog_message.str().c_str());
 
     std::string escaped_details = details;
     if (!details.empty()) { CharacterDatabase.EscapeString(escaped_details); }
@@ -920,7 +923,7 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
     std::mt19937 g(rd());
     std::shuffle(selectedGroups.begin(), selectedGroups.end(), g);
 
-    sLog->outMessage("sys", "[TrialOfFinality] Group %u, Wave %d: Spawning %u encounter groups. Highest Lvl: %u. Health Multi: %.2f",
+    sLog->outInfo("sys", "[TrialOfFinality] Group %u, Wave %d: Spawning %u encounter groups. Highest Lvl: %u. Health Multi: %.2f",
         groupId, currentTrial->currentWave, numGroupsToSpawn, currentTrial->highestLevelAtStart, healthMultiplier);
     currentTrial->activeMonsters.clear();
 
@@ -968,7 +971,7 @@ void TrialManager::SpawnActualWave(uint32 groupId) {
         return;
     }
 
-    sLog->outMessage("sys", "[TrialOfFinality] Group %u, Wave %d: Spawned a total of %u creatures.", groupId, currentTrial->currentWave, totalCreaturesSpawned);
+    sLog->outInfo("sys", "[TrialOfFinality] Group %u, Wave %d: Spawned a total of %u creatures.", groupId, currentTrial->currentWave, totalCreaturesSpawned);
 }
 
 void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) {
@@ -1006,13 +1009,13 @@ void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) {
 void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason) {
     ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
     if (!trialInfo) {
-        sLog->outWarning("sys", "[TrialOfFinality] FinalizeTrialOutcome called for group %u but no ActiveTrialInfo found. Reason: %s. Trial might have been already cleaned up.",
+        sLog->outWarn("sys", "[TrialOfFinality] FinalizeTrialOutcome called for group %u but no ActiveTrialInfo found. Reason: %s. Trial might have been already cleaned up.",
             groupId, reason.c_str());
         m_activeTrials.erase(groupId);
         return;
     }
 
-    sLog->outMessage("sys", "[TrialOfFinality] Finalizing trial for group %u. Overall Success: %s. Reason: %s.",
+    sLog->outInfo("sys", "[TrialOfFinality] Finalizing trial for group %u. Overall Success: %s. Reason: %s.",
         groupId, (overallSuccess ? "Yes" : "No"), reason.c_str());
 
     if (!overallSuccess) {
@@ -1097,10 +1100,10 @@ void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, con
                 pos = finalMessage.find("{player_list}");
                 if (pos != std::string::npos) { finalMessage.replace(pos, strlen("{player_list}"), playerListStr); }
                 sWorld->SendServerMessage(SERVER_MSG_STRING, finalMessage.c_str());
-                sLog->outMessage("sys", "[TrialOfFinality] World announcement made for group %u: %s", groupId, finalMessage.c_str());
+                sLog->outInfo("sys", "[TrialOfFinality] World announcement made for group %u: %s", groupId, finalMessage.c_str());
                 LogTrialDbEvent(TRIAL_EVENT_WORLD_ANNOUNCEMENT_SUCCESS, groupId, leaderPlayerObj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Winners: " + playerListStr);
             } else if (validWinners == 0) {
-                sLog->outMessage("sys", "[TrialOfFinality] World announcement skipped for group %u: No valid online winners found to announce.", groupId);
+                sLog->outInfo("sys", "[TrialOfFinality] World announcement skipped for group %u: No valid online winners found to announce.", groupId);
             }
         }
         TriggerCityNpcCheers(groupId); // New call for 15b
@@ -1397,7 +1400,7 @@ void TrialManager::TriggerCityNpcCheers(uint32 /*successfulGroupId*/) {
         }
     }
 
-    sLog->outMessage("sys", "[TrialOfFinality] Triggered %d city NPCs to cheer using cache.", totalCheeredThisEvent);
+    sLog->outInfo("sys", "[TrialOfFinality] Triggered %d city NPCs to cheer using cache.", totalCheeredThisEvent);
     if (totalCheeredThisEvent > 0) { // Only log DB event if someone actually cheered
         LogTrialDbEvent(TRIAL_EVENT_NPC_CHEER_TRIGGERED, 0, nullptr, 0, 0, "Total NPCs cheered (cached): " + std::to_string(totalCheeredThisEvent));
     }
@@ -1632,9 +1635,9 @@ public:
     static std::map<uint32, std::vector<ObjectGuid>> s_cheeringNpcCacheByZone;
     void OnConfigLoad(bool reload) override
     {
-        sLog->outMessage("sys", "Loading Trial of Finality module configuration...");
+        sLog->outInfo("sys", "Loading Trial of Finality module configuration...");
         ModuleEnabled = sConfigMgr->GetOption<bool>("TrialOfFinality.Enable", false);
-        if (!ModuleEnabled) { sLog->outMessage("sys", "Trial of Finality: Module disabled by configuration."); return; }
+        if (!ModuleEnabled) { sLog->outInfo("sys", "Trial of Finality: Module disabled by configuration."); return; }
         FateweaverArithosEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.FateweaverArithos.EntryID", 0);
         AnnouncerEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.Announcer.EntryID", 0);
         TrialTokenEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.TrialToken.EntryID", 0);
@@ -1736,7 +1739,7 @@ public:
         s_cheeringNpcCacheByZone.clear();
         if (CheeringNpcsEnable && !CheeringNpcCityZoneIDs.empty())
         {
-            sLog->outMessage("sys", "[TrialOfFinality] Caching cheering NPCs...");
+            sLog->outInfo("sys", "[TrialOfFinality] Caching cheering NPCs...");
             std::string zoneIdString;
             for (uint32 zoneId : CheeringNpcCityZoneIDs)
             {
@@ -1770,7 +1773,7 @@ public:
                     s_cheeringNpcCacheByZone[zoneId].push_back(ObjectGuid(HighGuid::Creature, 0, guidLow));
                     count++;
                 } while (result->NextRow());
-                sLog->outMessage("sys", "[TrialOfFinality] Cached %u cheering NPCs in %lu zones.", count, s_cheeringNpcCacheByZone.size());
+                sLog->outInfo("sys", "[TrialOfFinality] Cached %u cheering NPCs in %lu zones.", count, s_cheeringNpcCacheByZone.size());
                 for (const auto& pair : s_cheeringNpcCacheByZone)
                 {
                     sLog->outDetail("[TrialOfFinality] Zone %u: Cached %lu NPCs.", pair.first, pair.second.size());
@@ -1778,16 +1781,16 @@ public:
             }
             else
             {
-                sLog->outMessage("sys", "[TrialOfFinality] No cheering NPCs found to cache or database error.");
+                sLog->outInfo("sys", "[TrialOfFinality] No cheering NPCs found to cache or database error.");
             }
         }
         else if (!CheeringNpcsEnable)
         {
-            sLog->outMessage("sys", "[TrialOfFinality] Cheering NPCs disabled, cache not populated.");
+            sLog->outInfo("sys", "[TrialOfFinality] Cheering NPCs disabled, cache not populated.");
         }
         else if (CheeringNpcCityZoneIDs.empty())
         {
-            sLog->outMessage("sys", "[TrialOfFinality] No City Zone IDs configured for cheering NPCs, cache not populated.");
+            sLog->outInfo("sys", "[TrialOfFinality] No City Zone IDs configured for cheering NPCs, cache not populated.");
         }
 
         // Helper lambda for parsing aura ID strings
@@ -1953,8 +1956,8 @@ public:
             sLog->outError("sys", "Trial of Finality: Critical EntryID (NPC, Item, Title) not configured. Disabling module functionality.");
             ModuleEnabled = false; return;
         }
-        sLog->outMessage("sys", "Trial of Finality: Configuration loaded. Module enabled.");
-        if (reload) { sLog->outMessage("sys", "Trial of Finality: Configuration reloaded. Consider restarting for full effect if scripts were already registered."); }
+        sLog->outInfo("sys", "Trial of Finality: Configuration loaded. Module enabled.");
+        if (reload) { sLog->outInfo("sys", "Trial of Finality: Configuration reloaded. Consider restarting for full effect if scripts were already registered."); }
     }
 };
 
