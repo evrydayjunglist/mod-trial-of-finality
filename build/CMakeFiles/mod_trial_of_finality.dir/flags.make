@@ -4,6 +4,6 @@
 # compile CXX with /usr/bin/c++
 CXX_DEFINES = -Dmod_trial_of_finality_EXPORTS
 
-CXX_INCLUDES = -I/app/../../src/server -I/app/../../src/server/game -I/app/../../src/server/database -I/app/../../src/server/shared -I/app/../../src/server/scripts -I/app/../../dep/g3dlite/include -I/app/../../dep/gsoap -I/app/../../dep/recastnavigation/Recast/Include -I/app/../../dep/recastnavigation/Detour/Include -I/app/../../dep/recastnavigation/DetourTileCache/Include -I/app/build
+CXX_INCLUDES = -I/app/src/server -I/app/dep/g3dlite/include -I/app/dep/gsoap -I/app/dep/recastnavigation/Recast/Include -I/app/dep/recastnavigation/Detour/Include -I/app/dep/recastnavigation/DetourTileCache/Include -I/app/build
 
 CXX_FLAGS = -fPIC
