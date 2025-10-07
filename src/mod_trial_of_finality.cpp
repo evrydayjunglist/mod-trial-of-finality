@@ -10,8 +10,7 @@
 #include "Map.h"
 #include "ObjectMgr.h"
 #include "Player.h"
-#include "ScriptedCreature.h"
-#include "ScriptedGossip.h"
+#include "CreatureScript.h"
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include "Log.h"
@@ -34,6 +33,7 @@
 #include "DBCStores.h"
 #include "DatabaseEnv.h"
 #include "ObjectGuid.h"
+#include "CharacterCache.h"
 
 // Module specific namespace
 namespace ModTrialOfFinality
@@ -1048,7 +1048,7 @@ void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, con
                         std::string safe_reason = reason;
                         CharacterDatabase.EscapeString(safe_reason);
                         LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer_obj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Perma-death DB flag set: " + safe_reason);
-                        sLog->outCritical("[TrialOfFinality] Player %s (GUID %s, Account %u, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).",
+                        sLog->outFatal("[TrialOfFinality] Player %s (GUID %s, Account %u, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).",
                             downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), downedPlayer_obj->GetSession()->GetAccountId(), groupId, reason.c_str(), trialInfo->currentWave);
                         ChatHandler(downedPlayer_obj->GetSession()).SendSysMessage("The trial has ended in failure. Your fate is sealed.");
                         // Ensure aura is removed as DB is master
@@ -1066,7 +1066,7 @@ void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, con
                     std::string safe_reason_offline = reason;
                     CharacterDatabase.EscapeString(safe_reason_offline);
                     LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player GUID " + playerGuid.ToString() + " (offline) - Perma-death DB flag set: " + safe_reason_offline);
-                    sLog->outCritical("[TrialOfFinality] Offline Player (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).", playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
+                    sLog->outFatal("[TrialOfFinality] Offline Player (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).", playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
                 }
             }
         }
@@ -1504,7 +1504,7 @@ public:
         return true;
     }
 
-    bool OnGossipSelect(Player* player, Creature* creature, uint32 /*sender*/, uint32 action) override
+    bool OnGossipSelect(Player* player, Creature* creature, uint32 action) override
     {
         ClearGossipMenuFor(player);
         switch(action)
@@ -1997,7 +1997,7 @@ public:
             playerGuid = targetPlayer->GetGUID();
         } else {
             targetPlayer = nullptr; // Not selected or name mismatch, try to find by name
-            playerGuid = sObjectAccessor->GetPlayerGUIDByName(charName);
+            playerGuid = sCharacterCache->GetCharacterGuidByName(charName);
         }
 
         if (playerGuid.IsEmpty()) {
