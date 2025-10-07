@@ -9,6 +9,8 @@ This guide provides a detailed explanation of all configuration options availabl
 ## Core Entry IDs
 *   **`TrialOfFinality.FateweaverArithos.EntryID`**: (uint32, default: `0` - example `90000`)
     *   Creature Entry ID for the Fateweaver Arithos NPC, who initiates the trial. This ID must exist in your `creature_template`.
+*   **`TrialOfFinality.FateweaverArithos.DisplayID`**: (uint32, default: `32871`)
+    *   The model display ID for the Fateweaver Arithos NPC. Allows for customizing the NPC's appearance without changing its entry ID.
 *   **`TrialOfFinality.Announcer.EntryID`**: (uint32, default: `0` - example `90002`)
     *   Creature Entry ID for the Trial Announcer NPC that provides commentary during the trial. This ID must exist in your `creature_template`.
 *   **`TrialOfFinality.TrialToken.EntryID`**: (uint32, default: `0` - example `90001`)

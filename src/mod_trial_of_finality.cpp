@@ -1305,7 +1305,7 @@ bool TrialManager::ValidateGroupForTrial(Player* leader, Creature* trialNpc) {
             if (result) {
                 Field* fields = result->Fetch();
                 uint32 failedGuid = fields[0].Get<uint32>();
-                Player* failedPlayer = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(failedGuid));
+                Player* failedPlayer = ObjectAccessor::FindPlayer(ObjectGuid(HighGuid::Player, failedGuid));
                 std::string failedPlayerName = "Unknown";
                 if(failedPlayer)
                 {
