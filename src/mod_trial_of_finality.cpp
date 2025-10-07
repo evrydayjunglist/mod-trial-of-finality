@@ -5,6 +5,7 @@
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GossipDef.h"
+#include "MapManager.h"
 #include "Group.h"
 #include "Item.h"
 #include "Map.h"
@@ -34,10 +35,569 @@
 #include "DatabaseEnv.h"
 #include "ObjectGuid.h"
 #include "CharacterCache.h"
+#include "InstanceScript.h"
 
 // Module specific namespace
 namespace ModTrialOfFinality
 {
+
+// --- Instance Script for the Trial ---
+// This class will manage the state and events for a single Trial of Finality instance.
+struct instance_trial_of_finality : public InstanceScript
+{
+    instance_trial_of_finality(Map* map) : InstanceScript(map) { }
+
+    // --- State Tracking ---
+    uint32 currentWave;
+    uint8 highestLevelAtStart;
+    ObjectGuid announcerGuid;
+    std::set<ObjectGuid> activeMonsters;
+    std::map<ObjectGuid, time_t> downedPlayerGuids;
+    std::set<ObjectGuid> permanentlyFailedPlayerGuids;
+    std::set<ObjectGuid> playersWarnedForLeavingArena;
+    bool isTestTrial;
+
+    // Forfeit Vote
+    bool forfeitVoteInProgress;
+    time_t forfeitVoteStartTime;
+    std::set<ObjectGuid> playersWhoVotedForfeit;
+
+    // --- Overridden Hooks ---
+    uint32 boundaryCheckTimer;
+    uint32 forfeitCheckTimer;
+
+    void Initialize() override
+    {
+        // Set up the instance for 5 waves (boss encounters)
+        SetBossNumber(5);
+        currentWave = 0;
+        forfeitVoteInProgress = false;
+        boundaryCheckTimer = 5000;
+        forfeitCheckTimer = 1000;
+        isTestTrial = false;
+    }
+
+    void Update(uint32 diff) override
+    {
+        scheduler.Update(diff);
+
+        // --- Boundary Check ---
+        if (boundaryCheckTimer <= diff)
+        {
+            boundaryCheckTimer = 5000; // Reset timer
+            if (GetBossState(currentWave -1) == IN_PROGRESS)
+                CheckPlayerLocationsAndEnforceBoundaries();
+        }
+        else
+        {
+            boundaryCheckTimer -= diff;
+        }
+
+        // --- Forfeit Vote Check ---
+        if (forfeitCheckTimer <= diff)
+        {
+            forfeitCheckTimer = 1000; // Reset timer
+            if (forfeitVoteInProgress)
+            {
+                // Timeout Check
+                if (time(nullptr) - forfeitVoteStartTime > 30)
+                {
+                    forfeitVoteInProgress = false;
+                    playersWhoVotedForfeit.clear();
+                    std::string msg = "The vote to forfeit the trial has failed to pass in time and is now cancelled.";
+                    uint32 groupId = 0;
+                    if (Player* p = instance->GetPlayer(0)) { if (p->GetGroup()) groupId = p->GetGroup()->GetId(); }
+                    LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, groupId, nullptr, currentWave, highestLevelAtStart, "Vote timed out.");
+                    DoSendNotifyToInstance(msg.c_str());
+                }
+            }
+        }
+        else
+        {
+            forfeitCheckTimer -= diff;
+        }
+    }
+
+    void HandleMonsterKilled(Creature* creature)
+    {
+        if (activeMonsters.erase(creature->GetGUID()))
+        {
+            sLog->outDetail("[TrialOfFinality] Instance %u killed a trial monster. %lu remaining in wave %d.",
+                instance->GetInstanceId(), activeMonsters.size(), currentWave);
+
+            if (activeMonsters.empty())
+            {
+                sLog->outInfo("sys", "[TrialOfFinality] Instance %u has cleared wave %d.", instance->GetInstanceId(), currentWave);
+                SetBossState(currentWave - 1, DONE); // Mark current wave as done (wave 1 is boss 0)
+
+                // Clear any downed players from the previous wave - they are now safe
+                if (!downedPlayerGuids.empty())
+                {
+                    instance->DoForAllPlayers([this](Player* player)
+                    {
+                        if (downedPlayerGuids.count(player->GetGUID()))
+                        {
+                            ChatHandler(player->GetSession()).SendSysMessage("The wave is over! You have survived... for now.");
+                        }
+                    });
+                    downedPlayerGuids.clear();
+                }
+
+                if (currentWave < 5)
+                {
+                    PrepareAndAnnounceWave(currentWave + 1, 8000); // 8 second delay between waves
+                    SetBossState(currentWave, IN_PROGRESS);
+                }
+                else
+                {
+                    FinalizeTrialOutcome(true, "All 5 waves successfully cleared.");
+                }
+            }
+        }
+    }
+
+    void OnCreatureCreate(Creature* creature) override
+    {
+        if (creature->GetEntry() == AnnouncerEntry)
+        {
+            announcerGuid = creature->GetGUID();
+        }
+        else if (creature->IsHostileToPlayers()) // A simple way to identify trial monsters
+        {
+            activeMonsters.insert(creature->GetGUID());
+        }
+    }
+
+    void OnPlayerEnter(Player* player) override
+    {
+        if (!player)
+        {
+            return;
+        }
+
+        // The first player to enter initializes the instance's difficulty and starts the trial.
+        if (GetBossState(0) == NOT_STARTED)
+        {
+            if (PreTrialData* data = TrialManager::instance()->GetPreTrialData(player->GetGroup()->GetId()))
+            {
+                highestLevelAtStart = data->highestLevel;
+                isTestTrial = data->isTestTrial;
+                TrialManager::instance()->CleanupPreTrialData(player->GetGroup()->GetId()); // Clean up the cached data
+                sLog->outInfo("sys", "[TrialOfFinality] Instance %u initialized for group %u with highest level %u.", instance->GetInstanceId(), player->GetGroup()->GetId(), highestLevelAtStart);
+
+                // Start Wave 1
+                PrepareAndAnnounceWave(1, 5000);
+                SetBossState(0, IN_PROGRESS);
+                LogTrialDbEvent(TRIAL_EVENT_START, player->GetGroup()->GetId(), player, 0, highestLevelAtStart, "Trial started in instance.");
+            }
+            else
+            {
+                sLog->outError("sys", "[TrialOfFinality] Could not find pre-trial data for group %u when entering instance %u. Aborting.", player->GetGroup()->GetId(), instance->GetInstanceId());
+                player->TeleportTo(player->GetBindPoint());
+                return;
+            }
+        }
+
+        // Setup for each player entering
+        player->SetDisableXpGain(true, true);
+        player->AddItem(TrialTokenEntry, 1);
+        ChatHandler(player->GetSession()).SendSysMessage("The Trial of Finality has begun!");
+    }
+
+    // --- Wave Management ---
+    void PrepareAndAnnounceWave(int waveNumber, uint32 delayMs)
+    {
+        currentWave = waveNumber;
+        uint32 groupId = 0;
+        if (Player* p = instance->GetPlayer(0)) { if (p->GetGroup()) groupId = p->GetGroup()->GetId(); }
+        sLog->outInfo("sys", "[TrialOfFinality] Instance %u preparing for wave %d.", instance->GetInstanceId(), waveNumber);
+        LogTrialDbEvent(TRIAL_EVENT_WAVE_START, groupId, nullptr, waveNumber, highestLevelAtStart, "Announcing wave.");
+
+        Creature* announcer = nullptr;
+        if (announcerGuid.IsEmpty())
+        {
+            Position announcerPos = { ArenaTeleportX + 5.0f, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO };
+            announcer = instance->SummonCreature(AnnouncerEntry, announcerPos, TEMPSUMMON_MANUAL_DESPAWN);
+        }
+        else
+        {
+            announcer = instance->GetCreature(announcerGuid);
+        }
+
+        if (announcer)
+        {
+            if (auto* ai = dynamic_cast<npc_trial_announcer_ai*>(announcer->AI()))
+                ai->AnnounceWave(waveNumber);
+            else
+            {
+                std::string waveAnnounce = "Brave contenders, prepare yourselves! Wave " + std::to_string(waveNumber) + " approaches!";
+                announcer->Yell(waveAnnounce, LANG_UNIVERSAL, nullptr);
+            }
+        }
+
+        scheduler.Schedule(std::chrono::milliseconds(delayMs), [this]()
+        {
+            SpawnActualWave();
+        });
+    }
+
+    void SpawnActualWave()
+    {
+        uint32 activePlayers = 0;
+        instance->DoForAllPlayers([&](Player* player)
+        {
+            if (player->IsAlive() && !downedPlayerGuids.count(player->GetGUID()))
+                activePlayers++;
+        });
+
+        if (activePlayers == 0)
+        {
+            sLog->outError("sys", "[TrialOfFinality] Instance %u, Wave %d: No active players left to spawn wave for. Finalizing trial.", instance->GetInstanceId(), currentWave);
+            // FinalizeTrialOutcome(false, "All players defeated or disconnected before wave " + std::to_string(currentWave) + " could spawn."); // to be implemented
+            return;
+        }
+
+        const std::vector<std::vector<uint32>>* currentWaveNpcPool = nullptr;
+        const CustomNpcScalingTier* customScalingTier = nullptr;
+        float healthMultiplier = 1.0f;
+        const std::vector<uint32>* aurasToAdd = nullptr;
+
+        if (currentWave <= 2) {
+            currentWaveNpcPool = &NpcPoolEasy;
+            customScalingTier = &CustomScalingEasy;
+        } else if (currentWave <= 4) {
+            currentWaveNpcPool = &NpcPoolMedium;
+            customScalingTier = &CustomScalingMedium;
+        } else {
+            currentWaveNpcPool = &NpcPoolHard;
+            customScalingTier = &CustomScalingHard;
+        }
+
+        if (NpcScalingMode == "custom_scaling_rules" && customScalingTier) {
+            healthMultiplier = customScalingTier->HealthMultiplier;
+            aurasToAdd = &customScalingTier->AurasToAdd;
+        }
+
+        if (!currentWaveNpcPool || currentWaveNpcPool->empty()) {
+            sLog->outError("sys", "[TrialOfFinality] Instance %u, Wave %d: Cannot spawn wave. NPC pool for this difficulty is empty.", instance->GetInstanceId(), currentWave);
+            // FinalizeTrialOutcome(false, "Internal error: NPC pool empty for wave " + std::to_string(currentWave));
+            return;
+        }
+
+        if (WAVE_SPAWN_POSITIONS.empty()) {
+            sLog->outError("sys", "[TrialOfFinality] Instance %u, Wave %d: Cannot spawn wave. No spawn positions are configured or loaded.", instance->GetInstanceId(), currentWave);
+            // FinalizeTrialOutcome(false, "Internal error: No spawn positions configured.");
+            return;
+        }
+        uint32 numSpawnsPerWave = WAVE_SPAWN_POSITIONS.size();
+
+        uint32 numGroupsToSpawn = std::min((uint32)numSpawnsPerWave, activePlayers + 1);
+        numGroupsToSpawn = std::max(numGroupsToSpawn, 1u);
+
+        if (numGroupsToSpawn > currentWaveNpcPool->size()) {
+            sLog->outWarn("sys", "[TrialOfFinality] Instance %u, Wave %d: Requested %u encounter groups, but pool only has %lu. Spawning %lu instead.",
+                instance->GetInstanceId(), currentWave, numGroupsToSpawn, currentWaveNpcPool->size(), currentWaveNpcPool->size());
+            numGroupsToSpawn = currentWaveNpcPool->size();
+        }
+
+        std::vector<std::vector<uint32>> selectedGroups = *currentWaveNpcPool;
+        std::random_device rd;
+        std::mt19937 g(rd());
+        std::shuffle(selectedGroups.begin(), selectedGroups.end(), g);
+
+        sLog->outInfo("sys", "[TrialOfFinality] Instance %u, Wave %d: Spawning %u encounter groups. Highest Lvl: %u. Health Multi: %.2f",
+            instance->GetInstanceId(), currentWave, numGroupsToSpawn, highestLevelAtStart, healthMultiplier);
+        activeMonsters.clear();
+
+        uint32 spawnPosIndex = 0;
+        for (uint32 i = 0; i < numGroupsToSpawn; ++i)
+        {
+            const std::vector<uint32>& groupOfNpcs = selectedGroups[i];
+            if (spawnPosIndex + groupOfNpcs.size() > numSpawnsPerWave)
+                continue;
+
+            for (uint32 creatureEntry : groupOfNpcs)
+            {
+                const Position& spawnPos = WAVE_SPAWN_POSITIONS[spawnPosIndex++];
+                if (Creature* creature = instance->SummonCreature(creatureEntry, spawnPos, TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 3600 * 1000))
+                {
+                    creature->SetAI(new npc_trial_monster_ai(creature));
+                    creature->SetLevel(highestLevelAtStart);
+                    if (healthMultiplier != 1.0f)
+                    {
+                        creature->SetMaxHealth(uint32(creature->GetMaxHealth() * healthMultiplier));
+                        creature->SetHealth(creature->GetMaxHealth());
+                    }
+                    if (aurasToAdd)
+                    {
+                        for (uint32 auraId : *aurasToAdd)
+                            creature->AddAura(auraId, creature);
+                    }
+                    // OnCreatureCreate will add to activeMonsters
+                }
+            }
+        }
+    }
+
+    // --- Player State and Trial Outcome ---
+    void HandlePlayerDowned(Player* downedPlayer)
+    {
+        if (!downedPlayer) return;
+
+        ObjectGuid playerGuid = downedPlayer->GetGUID();
+        downedPlayerGuids[playerGuid] = time(nullptr);
+        uint32 groupId = downedPlayer->GetGroup() ? downedPlayer->GetGroup()->GetId() : 0;
+
+        sLog->outInfo("sys", "[TrialOfFinality] Player %s (GUID %s, Instance %u) has been downed in wave %d.",
+            downedPlayer->GetName().c_str(), playerGuid.ToString().c_str(), instance->GetInstanceId(), currentWave);
+
+        ChatHandler(downedPlayer->GetSession()).SendSysMessage("You have been defeated! You must be resurrected before the wave ends to avoid permanent failure!");
+        LogTrialDbEvent(TRIAL_EVENT_PLAYER_DEATH_TOKEN, groupId, downedPlayer, currentWave, highestLevelAtStart, "Player downed, awaiting resurrection or wave end.");
+
+        // Check if this was the last player
+        uint32 activePlayers = 0;
+        instance->DoForAllPlayers([&](Player* player)
+        {
+            if (player->IsAlive() && !downedPlayerGuids.count(player->GetGUID()))
+                activePlayers++;
+        });
+
+        if (activePlayers == 0)
+        {
+            sLog->outInfo("sys", "[TrialOfFinality] All players in instance %u are downed. Finalizing trial as a failure.", instance->GetInstanceId());
+            FinalizeTrialOutcome(false, "All players were defeated.");
+        }
+    }
+
+    void HandlePlayerResurrect(Player* player)
+    {
+        if (downedPlayerGuids.erase(player->GetGUID()))
+        {
+            uint32 groupId = player->GetGroup() ? player->GetGroup()->GetId() : 0;
+            sLog->outInfo("sys", "[TrialOfFinality] Player %s (GUID %s, Instance %u) was resurrected during the trial.",
+                player->GetName().c_str(), player->GetGUID().ToString().c_str(), instance->GetInstanceId());
+            ChatHandler(player->GetSession()).SendSysMessage("You have been resurrected! Your fate is no longer sealed... for now.");
+            LogTrialDbEvent(TRIAL_EVENT_PLAYER_RESURRECTED, groupId, player, currentWave, highestLevelAtStart, "Player resurrected mid-wave.");
+        }
+    }
+
+    void FinalizeTrialOutcome(bool overallSuccess, const std::string& reason)
+    {
+        uint32 groupId = 0;
+        Player* leader = nullptr;
+        if (Player* p = instance->GetPlayer(0))
+        {
+            if (p->GetGroup())
+                groupId = p->GetGroup()->GetId();
+            leader = p; // Use first player as a proxy for logging if needed
+        }
+
+        sLog->outInfo("sys", "[TrialOfFinality] Finalizing trial for instance %u. Overall Success: %s. Reason: %s.",
+            instance->GetInstanceId(), (overallSuccess ? "Yes" : "No"), reason.c_str());
+
+        if (!overallSuccess)
+        {
+            SetBossState(currentWave - 1, FAIL);
+            if (!downedPlayerGuids.empty())
+            {
+                for(const auto& pair : downedPlayerGuids)
+                {
+                    ObjectGuid playerGuid = pair.first;
+                    permanentlyFailedPlayerGuids.insert(playerGuid); // Mark for internal logic
+                    Player* downedPlayer = ObjectAccessor::FindPlayer(playerGuid);
+                    if (downedPlayer && downedPlayer->GetSession())
+                    {
+                        if (PermaDeathExemptGMs && downedPlayer->GetSession()->GetSecurity() >= SEC_GAMEMASTER)
+                        {
+                            sLog->outInfo("sys", "[TrialOfFinality] GM Player %s (GUID %s) is EXEMPT from perma-death.", downedPlayer->GetName().c_str(), playerGuid.ToString().c_str());
+                        }
+                        else
+                        {
+                            CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()", playerGuid.GetCounter());
+                            sLog->outFatal("[TrialOfFinality] Player %s (GUID %s) PERMANENTLY FAILED due to trial failure: %s.", downedPlayer->GetName().c_str(), playerGuid.ToString().c_str(), reason.c_str());
+                            LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer, currentWave, highestLevelAtStart, "Perma-death DB flag set: " + reason);
+                            ChatHandler(downedPlayer->GetSession()).SendSysMessage("The trial has ended in failure. Your fate is sealed.");
+                        }
+                    }
+                    else
+                    {
+                        CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()", playerGuid.GetCounter());
+                        sLog->outFatal("[TrialOfFinality] Offline Player (GUID %s) PERMANENTLY FAILED due to trial failure: %s.", playerGuid.ToString().c_str(), reason.c_str());
+                        LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, nullptr, currentWave, highestLevelAtStart, "Offline Player - Perma-death DB flag set: " + reason);
+                    }
+                }
+            }
+            downedPlayerGuids.clear();
+            LogTrialDbEvent(TRIAL_EVENT_TRIAL_FAILURE, groupId, leader, currentWave, highestLevelAtStart, reason);
+        }
+        else
+        {
+            LogTrialDbEvent(TRIAL_EVENT_TRIAL_SUCCESS, groupId, leader, currentWave, highestLevelAtStart, reason);
+            // World announcement and cheering logic could be triggered here if desired
+        }
+        CleanupTrial(overallSuccess);
+    }
+
+    void CleanupTrial(bool success)
+    {
+        // Despawn any remaining monsters
+        for (const auto& monsterGuid : activeMonsters)
+            if (Creature* monster = instance->GetCreature(monsterGuid))
+                monster->DespawnOrUnsummon();
+        activeMonsters.clear();
+
+        // Despawn announcer
+        if (!announcerGuid.IsEmpty())
+            if (Creature* announcer = instance->GetCreature(announcerGuid))
+                announcer->DespawnOrUnsummon();
+
+        // Process all players in the instance
+        instance->DoForAllPlayers([this, success](Player* player)
+        {
+            player->DestroyItemCount(TrialTokenEntry, 1, true, false);
+            player->SetDisableXpGain(false, true);
+
+            if (!permanentlyFailedPlayerGuids.count(player->GetGUID()))
+            {
+                 ChatHandler(player->GetSession()).SendSysMessage("The Trial of Finality has concluded. You are being teleported out.");
+                 if (ExitOverrideHearthstone)
+                     player->TeleportTo(ExitMapID, ExitTeleportX, ExitTeleportY, ExitTeleportZ, ExitTeleportO);
+                 else
+                     player->TeleportTo(player->GetBindPoint());
+            }
+        });
+
+        // Give rewards on success
+        if (success)
+        {
+            instance->DoForAllPlayers([this](Player* player)
+            {
+                if (permanentlyFailedPlayerGuids.count(player->GetGUID())) return;
+
+                if (GoldReward > 0)
+                {
+                    player->ModifyMoney(GoldReward);
+                    ChatHandler(player->GetSession()).PSendSysMessage("You have been awarded %u gold for your victory!", GoldReward / 10000);
+                }
+                if (TitleRewardID > 0)
+                {
+                    if (CharTitlesEntry const* titleEntry = sCharTitlesStore.LookupEntry(TitleRewardID))
+                    {
+                        player->SetTitle(titleEntry);
+                        ChatHandler(player->GetSession()).SendSysMessage("You have been granted a new title!");
+                    }
+                }
+            });
+        }
+
+        // If it was a test trial with a temporary group, disband it
+        if (isTestTrial)
+        {
+            if (Player* p = instance->GetPlayer(0))
+            {
+                if (Group* group = p->GetGroup())
+                {
+                    sLog->outDetail("[TrialOfFinality] Disbanding temporary test trial group %u for instance %u.", group->GetId(), instance->GetInstanceId());
+                    group->Disband();
+                }
+            }
+        }
+
+        // The instance will be destroyed automatically when the last player leaves.
+        // No need to manually manage trial info maps anymore.
+        sLog->outInfo("sys", "[TrialOfFinality] Cleaned up trial for instance %u.", instance->GetInstanceId());
+    }
+
+    void CheckPlayerLocationsAndEnforceBoundaries()
+    {
+        Position centerPos(ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, 0.0f);
+        uint32 groupId = 0;
+        if (Player* p = instance->GetPlayer(0)) { if (p->GetGroup()) groupId = p->GetGroup()->GetId(); }
+
+        instance->DoForAllPlayers([this, &centerPos, groupId](Player* player)
+        {
+            if (player->IsAlive() && !(GMDebugEnable && player->GetSession()->GetSecurity() >= SEC_GAMEMASTER))
+            {
+                bool isOutside = player->GetDistance(centerPos) > ArenaRadius;
+                if (isOutside)
+                {
+                    if (playersWarnedForLeavingArena.count(player->GetGUID()))
+                    {
+                        sLog->outWarn("sys", "[TrialOfFinality] Player %s (Instance %u) left the arena after being warned. Failing the trial.", player->GetName().c_str(), instance->GetInstanceId());
+                        std::string reason = player->GetName() + " has fled the Trial of Finality, forfeiting the challenge for the group.";
+                        LogTrialDbEvent(TRIAL_EVENT_PLAYER_FORFEIT_ARENA, groupId, player, currentWave, highestLevelAtStart, reason);
+                        FinalizeTrialOutcome(false, reason);
+                    }
+                    else
+                    {
+                        playersWarnedForLeavingArena.insert(player->GetGUID());
+                        ChatHandler(player->GetSession()).SendSysMessage("WARNING: You have left the trial arena! Return immediately or you will forfeit the trial for your entire group!");
+                        LogTrialDbEvent(TRIAL_EVENT_PLAYER_WARNED_ARENA_LEAVE, groupId, player, currentWave, highestLevelAtStart, "Player left arena boundary and was warned.");
+                    }
+                }
+            }
+        });
+    }
+
+    void HandleTrialForfeit(Player* player)
+    {
+        if (playersWhoVotedForfeit.count(player->GetGUID()))
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("You have already voted to forfeit.");
+            return;
+        }
+
+        uint32 activePlayers = 0;
+        instance->DoForAllPlayers([&](Player* p) {
+            if (p->IsAlive() && !permanentlyFailedPlayerGuids.count(p->GetGUID()))
+                activePlayers++;
+        });
+
+        if (activePlayers == 0)
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("There are no active players to vote.");
+            return;
+        }
+
+        uint32 groupId = player->GetGroup() ? player->GetGroup()->GetId() : 0;
+
+        if (!forfeitVoteInProgress)
+        {
+            forfeitVoteInProgress = true;
+            forfeitVoteStartTime = time(nullptr);
+            playersWhoVotedForfeit.insert(player->GetGUID());
+            std::string msg = player->GetName() + " has initiated a vote to forfeit! Type `/trialforfeit` to agree. (1/" + std::to_string(activePlayers) + " votes)";
+            LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_START, groupId, player, currentWave, highestLevelAtStart, "Forfeit vote started.");
+            DoSendNotifyToInstance(msg.c_str());
+        }
+        else
+        {
+            playersWhoVotedForfeit.insert(player->GetGUID());
+            std::string msg = player->GetName() + " has also voted to forfeit. (" + std::to_string(playersWhoVotedForfeit.size()) + "/" + std::to_string(activePlayers) + " votes)";
+            DoSendNotifyToInstance(msg.c_str());
+        }
+
+        if (playersWhoVotedForfeit.size() >= activePlayers)
+        {
+            std::string reason = "The group has unanimously voted to forfeit the trial.";
+            LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_SUCCESS, groupId, player, currentWave, highestLevelAtStart, reason);
+            CleanupTrial(false);
+        }
+    }
+};
+
+// --- Instance Script Loader ---
+// Registers our custom instance script with the server.
+class instance_trial_of_finality_loader : public InstanceScriptLoader
+{
+    public:
+        instance_trial_of_finality_loader() : InstanceScriptLoader("instance_trial_of_finality") { }
+
+        InstanceScript* GetInstanceScript(InstanceMap* map) const override
+        {
+            return new instance_trial_of_finality(map);
+        }
+};
 
 // --- Logging Enum and Function ---
 enum TrialEventType {
@@ -134,6 +694,7 @@ std::vector<Position> WAVE_SPAWN_POSITIONS;
 const uint32 AURA_ID_TRIAL_PERMADEATH = 40000;
 bool ModuleEnabled = false;
 uint32 FateweaverArithosEntry = 0;
+uint32 FateweaverArithosDisplayID = 0;
 uint32 AnnouncerEntry = 0;
 uint32 TrialTokenEntry = 0;
 uint32 TitleRewardID = 0;
@@ -185,1050 +746,59 @@ CustomNpcScalingTier CustomScalingHard;
 
 // --- Main Trial Logic ---
 
-// Structure to hold information about trials pending player confirmation
-struct PendingTrialInfo {
-    ObjectGuid leaderGuid;
-    std::set<ObjectGuid> memberGuidsToConfirm; // All members (excluding leader) who need to say yes
-    std::set<ObjectGuid> memberGuidsAccepted;
-    time_t creationTime;
-    uint8 highestLevelAtStart;
-
-    PendingTrialInfo(ObjectGuid leader, uint8 highestLvl)
-        : leaderGuid(leader), creationTime(time(nullptr)), highestLevelAtStart(highestLvl) {}
-
-    // Helper to check if a specific member still needs to confirm
-    bool IsStillPending(ObjectGuid memberGuid) const {
-        if (memberGuidsAccepted.count(memberGuid)) return false; // Already accepted
-        if (memberGuidsToConfirm.count(memberGuid)) return true; // In the list of those who need to confirm and hasn't accepted
-        return false;
-    }
-};
-
-struct ActiveTrialInfo {
-    uint32 groupId;
-    ObjectGuid leaderGuid;
-    std::set<ObjectGuid> memberGuids;
-    uint8 highestLevelAtStart;
-    time_t startTime;
-    int currentWave = 0;
-    ObjectGuid announcerGuid;
-    std::set<ObjectGuid> activeMonsters;
-    std::map<ObjectGuid, time_t> downedPlayerGuids;
-    std::set<ObjectGuid> permanentlyFailedPlayerGuids;
-    std::set<ObjectGuid> playersWarnedForLeavingArena;
-    bool isTestTrial = false;
-
-    // Forfeit Vote
-    bool forfeitVoteInProgress = false;
-    time_t forfeitVoteStartTime = 0;
-    std::set<ObjectGuid> playersWhoVotedForfeit;
-
-    ActiveTrialInfo() = default;
-    ActiveTrialInfo(Group* group, uint8 highestLvl) :
-        groupId(group->GetId()), leaderGuid(group->GetLeaderGUID()),
-        highestLevelAtStart(highestLvl), startTime(time(nullptr)), currentWave(0)
-    {
-        memberGuids.clear();
-        downedPlayerGuids.clear();
-        permanentlyFailedPlayerGuids.clear();
-        activeMonsters.clear();
-        playersWarnedForLeavingArena.clear();
-        playersWhoVotedForfeit.clear();
-        if (group) {
-            for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
-                if (Player* member = itr->GetSource()) { memberGuids.insert(member->GetGUID()); }
-            }
-        }
-    }
-};
-
 struct PendingSecondCheer {
     ObjectGuid npcGuid;
     time_t cheerTime;
+};
+
+// --- Pre-Trial Data Structures and Manager ---
+// This manager is now a simple data-passing utility to transfer information
+// from the outer world script (NPC interaction) into the newly created instance.
+struct PreTrialData
+{
+    uint8 highestLevel;
+    bool isTestTrial = false;
 };
 
 class TrialManager
 {
 public:
     static TrialManager* instance() { static TrialManager instance; return &instance; }
-    bool InitiateTrial(Player* leader);
-    void PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32 delayMs);
-    void SpawnActualWave(uint32 groupId);
-    void HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId);
-    void HandlePlayerDownedInTrial(Player* downedPlayer);
-    void FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason);
-    void HandleTrialFailure(uint32 groupId, const std::string& reason);
-    void CleanupTrial(uint32 groupId, bool success);
-    bool StartTestTrial(Player* gmPlayer);
-    void CheckPlayerLocationsAndEnforceBoundaries(uint32 groupId);
-    void TriggerCityNpcCheers(uint32 successfulGroupId);
 
-    ActiveTrialInfo* GetActiveTrialInfo(uint32 groupId) {
-        auto it = m_activeTrials.find(groupId);
-        if (it != m_activeTrials.end()) { return &it->second; }
+    // Caches the necessary pre-trial data for a group.
+    void PrepareForInstance(Group* group, uint8 highestLevel, bool isTest = false)
+    {
+        if (!group) return;
+        m_preTrialData[group->GetId()] = { highestLevel, isTest };
+        sLog->outDetail("[TrialOfFinality] Preparing group %u for instance, highest level: %u, isTest: %d", group->GetId(), highestLevel, isTest);
+    }
+
+    // Retrieves the cached data; intended to be called from the InstanceScript.
+    PreTrialData* GetPreTrialData(uint32 groupId)
+    {
+        auto it = m_preTrialData.find(groupId);
+        if (it != m_preTrialData.end())
+            return &it->second;
         return nullptr;
     }
+
+    // Cleans up the cached data once it has been consumed by the InstanceScript.
+    void CleanupPreTrialData(uint32 groupId)
+    {
+        m_preTrialData.erase(groupId);
+    }
+
     static bool ValidateGroupForTrial(Player* leader, Creature* trialNpc);
 
-    // --- Confirmation System ---
-    void HandleTrialConfirmation(Player* player, bool accepted);
-    void StartConfirmedTrial(uint32 groupId);
-    void AbortPendingTrial(uint32 groupId, const std::string& reason, Player* originator = nullptr);
-    void OnUpdate(uint32 diff);
-    void HandleTrialForfeit(Player* player);
-
 private:
-    time_t m_lastPendingCheck = 0; // To throttle pending check updates
-    time_t m_lastBoundaryCheck = 0;
-    time_t m_lastCheerCheck = 0;
     TrialManager() {}
     ~TrialManager() {}
     TrialManager(const TrialManager&) = delete;
     TrialManager& operator=(const TrialManager&) = delete;
-    std::map<uint32, ActiveTrialInfo> m_activeTrials;
-    std::map<uint32 /*groupId*/, PendingTrialInfo> m_pendingTrials;
-    std::vector<PendingSecondCheer> m_pendingSecondCheers;
+    std::map<uint32, PreTrialData> m_preTrialData;
 };
 
 // --- TrialManager Method Implementations ---
-
-void TrialManager::StartConfirmedTrial(uint32 groupId) {
-    auto it = m_pendingTrials.find(groupId);
-    if (it == m_pendingTrials.end()) {
-        sLog->outError("sys", "[TrialOfFinality] StartConfirmedTrial called for group %u, but no pending trial found.", groupId);
-        return;
-    }
-    PendingTrialInfo pendingInfo = it->second;
-    m_pendingTrials.erase(it);
-
-    Group* group = sGroupMgr->GetGroupById(groupId);
-    if (!group) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u for confirmed trial not found.", groupId);
-        return;
-    }
-    Player* leader = ObjectAccessor::FindPlayer(pendingInfo.leaderGuid);
-    if(!leader) {
-         sLog->outError("sys", "[TrialOfFinality] Group %u leader for confirmed trial not found.", groupId);
-         return;
-    }
-
-    // FINAL VALIDATION - re-run just in case something changed (e.g. member left)
-    // This is a simplified validation. A more robust one might re-check everything.
-    uint32 onlineMembersCount = 0;
-    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
-        if (Player* member = itr->GetSource()) {
-            if (member->GetSession()) onlineMembersCount++;
-        }
-    }
-    if (onlineMembersCount < MinGroupSize) {
-        ChatHandler(leader->GetSession()).SendSysMessage("The trial cannot begin; your group no longer meets the minimum size requirement.");
-        sLog->outWarn("sys", "[TrialOfFinality] Group %u aborted at final confirmation step: size is now %u, required %u.", groupId, onlineMembersCount, MinGroupSize);
-        return;
-    }
-
-    sLog->outInfo("sys", "[TrialOfFinality] Group %u has confirmed. Starting trial.", groupId);
-
-    // Create and store the ActiveTrialInfo
-    m_activeTrials[groupId] = ActiveTrialInfo(group, pendingInfo.highestLevelAtStart);
-    ActiveTrialInfo* newTrial = &m_activeTrials[groupId];
-
-    // Grant tokens, disable XP, teleport players
-    for (const auto& memberGuid : newTrial->memberGuids) {
-        Player* member = ObjectAccessor::FindPlayer(memberGuid);
-        if (member && member->GetSession()) {
-            // Disable XP Gain
-            member->SetDisableXpGain(true, true);
-            // Grant Trial Token
-            member->AddItem(TrialTokenEntry, 1);
-            // Teleport to Arena
-            member->TeleportTo(ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO);
-            ChatHandler(member->GetSession()).SendSysMessage("The Trial of Finality has begun!");
-        }
-    }
-
-    LogTrialDbEvent(TRIAL_EVENT_START, groupId, leader, 0, newTrial->highestLevelAtStart, "Trial started after confirmation.");
-
-    // Start wave 1
-    PrepareAndAnnounceWave(groupId, 1, 5000); // 5 second delay before first wave announcement
-}
-
-
-void TrialManager::AbortPendingTrial(uint32 groupId, const std::string& reason, Player* originator) {
-    auto it = m_pendingTrials.find(groupId);
-    if (it == m_pendingTrials.end()) {
-        return; // Already aborted or started
-    }
-
-    PendingTrialInfo pendingInfo = it->second;
-    m_pendingTrials.erase(it);
-
-    sLog->outInfo("sys", "[TrialOfFinality] Pending trial for group %u aborted. Reason: %s", groupId, reason.c_str());
-
-    // Notify all original members who were pending
-    std::set<ObjectGuid> membersToNotify = pendingInfo.memberGuidsToConfirm;
-    membersToNotify.insert(pendingInfo.leaderGuid);
-
-    for (const auto& guid : membersToNotify) {
-        Player* member = ObjectAccessor::FindPlayer(guid);
-        if (member && member->GetSession()) {
-            if (originator) {
-                 ChatHandler(member->GetSession()).PSendSysMessage("The Trial of Finality was aborted by %s. Reason: %s", originator->GetName().c_str(), reason.c_str());
-            } else {
-                 ChatHandler(member->GetSession()).PSendSysMessage("The Trial of Finality was aborted. Reason: %s", reason.c_str());
-            }
-        }
-    }
-}
-
-void TrialManager::HandleTrialForfeit(Player* player) {
-    if (!player || !player->GetGroup()) {
-        ChatHandler(player->GetSession()).SendSysMessage("You must be in a group to use this command.");
-        return;
-    }
-
-    uint32 groupId = player->GetGroup()->GetId();
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) {
-        ChatHandler(player->GetSession()).SendSysMessage("Your group is not in an active Trial of Finality.");
-        return;
-    }
-
-    if (trialInfo->playersWhoVotedForfeit.count(player->GetGUID())) {
-        ChatHandler(player->GetSession()).SendSysMessage("You have already voted to forfeit.");
-        return;
-    }
-
-    // Count active players for voting threshold
-    uint32 activePlayers = 0;
-    for (const auto& memberGuid : trialInfo->memberGuids) {
-        if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
-            Player* p = ObjectAccessor::FindPlayer(memberGuid);
-            if (p && p->GetSession() && p->IsAlive()) {
-                activePlayers++;
-            }
-        }
-    }
-    if (activePlayers == 0) { // Should not happen if player is able to type command, but as a safeguard
-        ChatHandler(player->GetSession()).SendSysMessage("There are no active players to vote.");
-        return;
-    }
-
-    if (!trialInfo->forfeitVoteInProgress) {
-        trialInfo->forfeitVoteInProgress = true;
-        trialInfo->forfeitVoteStartTime = time(nullptr);
-        trialInfo->playersWhoVotedForfeit.insert(player->GetGUID());
-
-        std::string msg = player->GetName() + " has initiated a vote to forfeit the Trial of Finality! All other active members must type `/trialforfeit` within 30 seconds to agree. (1/" + std::to_string(activePlayers) + " votes)";
-        LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_START, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Forfeit vote started.");
-
-        for (const auto& memberGuid : trialInfo->memberGuids) {
-            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
-                if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
-            }
-        }
-    } else {
-        trialInfo->playersWhoVotedForfeit.insert(player->GetGUID());
-        std::string msg = player->GetName() + " has also voted to forfeit. (" + std::to_string(trialInfo->playersWhoVotedForfeit.size()) + "/" + std::to_string(activePlayers) + " votes)";
-
-        for (const auto& memberGuid : trialInfo->memberGuids) {
-            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
-                if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
-            }
-        }
-    }
-
-    // Check if all active players have voted
-    if (trialInfo->playersWhoVotedForfeit.size() >= activePlayers) {
-        std::string reason = "The group has unanimously voted to forfeit the trial.";
-        LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_SUCCESS, groupId, player, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
-        // A forfeit does not trigger permadeath, it's a graceful exit.
-        // We call cleanup directly, not FinalizeTrialOutcome with failure.
-        // This means players who are downed are just teleported out, not punished.
-        CleanupTrial(groupId, false);
-    }
-}
-
-void TrialManager::HandleTrialConfirmation(Player* player, bool accepted) {
-    if (!player || !player->GetGroup()) {
-        ChatHandler(player->GetSession()).SendSysMessage("You must be in a group to use this command.");
-        return;
-    }
-    uint32 groupId = player->GetGroup()->GetId();
-    auto it = m_pendingTrials.find(groupId);
-    if (it == m_pendingTrials.end()) {
-        ChatHandler(player->GetSession()).SendSysMessage("There is no pending trial confirmation for your group.");
-        return;
-    }
-
-    PendingTrialInfo* pendingInfo = &it->second;
-
-    // Check if this player was actually prompted
-    if (!pendingInfo->memberGuidsToConfirm.count(player->GetGUID())) {
-        ChatHandler(player->GetSession()).SendSysMessage("You were not required to confirm for this trial.");
-        return;
-    }
-
-    if (pendingInfo->memberGuidsAccepted.count(player->GetGUID())) {
-        ChatHandler(player->GetSession()).SendSysMessage("You have already accepted the trial.");
-        return;
-    }
-
-    if (!accepted) {
-        // Abort the trial
-        AbortPendingTrial(groupId, "A member declined the invitation.", player);
-        return;
-    }
-
-    // Player accepted
-    pendingInfo->memberGuidsAccepted.insert(player->GetGUID());
-    sLog->outDetail("[TrialOfFinality] Player %s (Group %u) accepted the trial. (%lu/%lu accepted)",
-        player->GetName().c_str(), groupId, pendingInfo->memberGuidsAccepted.size(), pendingInfo->memberGuidsToConfirm.size());
-
-    // Notify the group of the acceptance
-     for (const auto& guid : pendingInfo->memberGuidsToConfirm) {
-        Player* member = ObjectAccessor::FindPlayer(guid);
-        if (member && member->GetSession()) {
-            ChatHandler(member->GetSession()).PSendSysMessage("%s has ACCEPTED the Trial of Finality.", player->GetName().c_str());
-        }
-    }
-    Player* leader = ObjectAccessor::FindPlayer(pendingInfo->leaderGuid);
-    if(leader && leader->GetSession()) {
-        ChatHandler(leader->GetSession()).PSendSysMessage("%s has ACCEPTED the Trial of Finality.", player->GetName().c_str());
-    }
-
-
-    // Check if all have accepted
-    if (pendingInfo->memberGuidsAccepted.size() == pendingInfo->memberGuidsToConfirm.size()) {
-        sLog->outInfo("sys", "[TrialOfFinality] All members for group %u have accepted. Starting trial.", groupId);
-        // Notify everyone that the trial is starting
-        std::set<ObjectGuid> allMembers = pendingInfo->memberGuidsToConfirm;
-        allMembers.insert(pendingInfo->leaderGuid);
-        for (const auto& guid : allMembers) {
-            Player* member = ObjectAccessor::FindPlayer(guid);
-            if (member && member->GetSession()) {
-                ChatHandler(member->GetSession()).SendSysMessage("All members have confirmed! The trial is about to begin!");
-            }
-        }
-        StartConfirmedTrial(groupId);
-    }
-}
-
-void TrialManager::OnUpdate(uint32 diff) {
-    // --- Pending Confirmations Check ---
-    m_lastPendingCheck += diff;
-    if (m_lastPendingCheck >= 2000) { // Check every 2 seconds
-        m_lastPendingCheck = 0;
-        if (!m_pendingTrials.empty()) {
-            time_t now = time(nullptr);
-            std::vector<uint32> timedOutGroupIds;
-            for (const auto& pair : m_pendingTrials) {
-                if (now - pair.second.creationTime > ConfirmationTimeoutSeconds) {
-                    timedOutGroupIds.push_back(pair.first);
-                }
-            }
-            for (uint32 groupId : timedOutGroupIds) {
-                AbortPendingTrial(groupId, "The confirmation request timed out.");
-            }
-        }
-    }
-
-    // --- Active Trial Boundary Check ---
-    m_lastBoundaryCheck += diff;
-    if (m_lastBoundaryCheck >= 5000) { // Check every 5 seconds
-        m_lastBoundaryCheck = 0;
-        if (!m_activeTrials.empty()) {
-            std::vector<uint32> groupIds;
-            for(auto const& [key, val] : m_activeTrials) { groupIds.push_back(key); }
-            for (uint32 groupId : groupIds) {
-                if(GetActiveTrialInfo(groupId)) { CheckPlayerLocationsAndEnforceBoundaries(groupId); }
-            }
-        }
-    }
-
-    // --- Active Trial Forfeit & Cheer Checks ---
-    m_lastCheerCheck += diff;
-    if (m_lastCheerCheck >= 1000) { // Check every second
-        m_lastCheerCheck = 0;
-        time_t now = time(nullptr);
-
-        // Second Cheer
-        if (!m_pendingSecondCheers.empty()) {
-            auto it = m_pendingSecondCheers.begin();
-            while (it != m_pendingSecondCheers.end()) {
-                if (now >= it->cheerTime) {
-                    if (Creature* npc = ObjectAccessor::GetCreature(*sWorld, it->npcGuid)) {
-                        if (npc->IsAlive() && !npc->IsInCombat()) { npc->HandleEmoteCommand(EMOTE_ONESHOT_CHEER); }
-                    }
-                    it = m_pendingSecondCheers.erase(it);
-                } else { ++it; }
-            }
-        }
-
-        // Forfeit Vote Checks
-        if (!m_activeTrials.empty()) {
-            // Create a copy of keys because the vote cancellation logic can modify m_activeTrials, invalidating iterators
-            std::vector<uint32> groupIds;
-            for(auto const& [key, val] : m_activeTrials) { groupIds.push_back(key); }
-
-            for (uint32 groupId : groupIds) {
-                ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-                if (!trialInfo || !trialInfo->forfeitVoteInProgress) {
-                    continue;
-                }
-
-                // Timeout Check
-                if (now - trialInfo->forfeitVoteStartTime > 30) {
-                    trialInfo->forfeitVoteInProgress = false;
-                    trialInfo->playersWhoVotedForfeit.clear();
-                    std::string msg = "The vote to forfeit the trial has failed to pass in time and is now cancelled.";
-                    LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Vote timed out.");
-                    for (const auto& memberGuid : trialInfo->memberGuids) {
-                        if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
-                            if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
-                        }
-                    }
-                } else { // Only do this check if not timed out
-                    // Active player count check to prevent solo forfeit exploit
-                    uint32 activePlayers = 0;
-                    for (const auto& guid : trialInfo->memberGuids) {
-                        if (!trialInfo->permanentlyFailedPlayerGuids.count(guid)) {
-                            if (Player* p = ObjectAccessor::FindPlayer(guid)) {
-                                if (p->GetSession() && p->IsAlive()) activePlayers++;
-                            }
-                        }
-                    }
-                    if (activePlayers < 2) {
-                        trialInfo->forfeitVoteInProgress = false;
-                        trialInfo->playersWhoVotedForfeit.clear();
-                        std::string msg = "The vote to forfeit was cancelled because there are no longer enough active players to vote.";
-                        LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Not enough active players.");
-                        for (const auto& memberGuid : trialInfo->memberGuids) {
-                            if (Player* member = ObjectAccessor::FindPlayer(memberGuid)) {
-                                if (member->GetSession()) ChatHandler(member->GetSession()).SendSysMessage(msg);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-bool TrialManager::InitiateTrial(Player* leader) {
-    if (!leader || !leader->GetSession()) return false;
-    Group* group = leader->GetGroup();
-    if (!group) {
-        ChatHandler(leader->GetSession()).SendSysMessage("You must be in a group to initiate the Trial.");
-        return false;
-    }
-
-    // Existing validation call - this should check critical things like location, perma-death, etc.
-    // Assuming ValidateGroupForTrial is static and accessible, or called by the NPC script before this.
-    // For this refactor, we assume basic group validity is checked by the caller (NPC script via ValidateGroupForTrial).
-    // Here, we focus on trial-specific states (active/pending) and group composition for confirmation.
-
-    // Initial Validations (leader, group exist already done by caller or first lines)
-    // Check if already active or pending
-    if (m_activeTrials.count(group->GetId())) {
-        sLog->outError("sys", "[TrialOfFinality] Attempt to start trial for group %u that is already active.", group->GetId());
-        ChatHandler(leader->GetSession()).SendSysMessage("Your group is already in an active Trial of Finality.");
-        return false;
-    }
-    if (m_pendingTrials.count(group->GetId())) {
-        ChatHandler(leader->GetSession()).SendSysMessage("Your group already has a pending Trial of Finality confirmation. Please wait or have members respond.");
-        return false;
-    }
-
-    // Determine highestLevel and onlineMembers for validation and PendingTrialInfo
-    uint8 highestLevel = 0;
-    uint32 onlineMembers = 0;
-    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
-        if (Player* member = itr->GetSource()) {
-            if (!member->GetSession()) {
-                continue;
-            }
-            onlineMembers++;
-            if (member->getLevel() > highestLevel) highestLevel = member->getLevel();
-        }
-    }
-
-    if (highestLevel == 0 || onlineMembers < MinGroupSize) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u: Could not determine highest level or not enough online members (%u found, %u required for confirmation start).", group->GetId(), onlineMembers, MinGroupSize);
-        ChatHandler(leader->GetSession()).SendSysMessage("Could not determine group's highest level or not enough online members meeting criteria for trial start.");
-        return false;
-    }
-
-    // If confirmation system is disabled, bypass confirmation and start directly
-    if (!ConfirmationEnable) {
-        sLog->outInfo("sys", "[TrialOfFinality] Group %u (Leader: %s) starting trial directly as confirmation system is disabled.", group->GetId(), leader->GetName().c_str());
-        PendingTrialInfo tempPendingInfo(leader->GetGUID(), highestLevel);
-        // Populate members for StartConfirmedTrial to use (all online members including leader)
-        // In a disabled-confirmation scenario, all present and eligible members are considered "accepted".
-        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
-            if (Player* member = itr->GetSource()) {
-                if (member->GetSession()) { // Ensure member is online
-                     // For direct start, all members who would be prompted are considered "to confirm"
-                     // and also immediately "accepted".
-                     tempPendingInfo.memberGuidsToConfirm.insert(member->GetGUID());
-                }
-            }
-        }
-        // Leader is implicitly accepted. Others are added to both lists.
-        tempPendingInfo.memberGuidsAccepted = tempPendingInfo.memberGuidsToConfirm;
-        if (!tempPendingInfo.memberGuidsAccepted.count(leader->GetGUID())) { // Ensure leader is in accepted if not prompted
-             tempPendingInfo.memberGuidsAccepted.insert(leader->GetGUID());
-        }
-
-
-        m_pendingTrials[group->GetId()] = tempPendingInfo; // Add briefly for StartConfirmedTrial
-        StartConfirmedTrial(group->GetId());
-        return true;
-    }
-
-    PendingTrialInfo pendingInfo(leader->GetGUID(), highestLevel);
-    for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next()) {
-        Player* member = itr->GetSource();
-        // Only prompt online members who are not the leader
-        if (member && member->GetSession() && member->GetGUID() != leader->GetGUID()) {
-            pendingInfo.memberGuidsToConfirm.insert(member->GetGUID());
-        }
-    }
-
-    m_pendingTrials[group->GetId()] = pendingInfo; // Add to map
-
-    sLog->outInfo("sys", "[TrialOfFinality] Group %u (Leader: %s, GUID %u) initiated confirmation phase. %lu members to confirm. Timeout: %u s.",
-        group->GetId(), leader->GetName().c_str(), leader->GetGUID().GetCounter(), pendingInfo.memberGuidsToConfirm.size(), ConfirmationTimeoutSeconds);
-
-    if (pendingInfo.memberGuidsToConfirm.empty()) {
-        sLog->outInfo("sys", "[TrialOfFinality] Group %u (Leader: %s) has no other members to confirm. Proceeding to start trial directly.", group->GetId(), leader->GetName().c_str());
-        StartConfirmedTrial(group->GetId());
-        // StartConfirmedTrial will handle moving from m_pendingTrials to m_activeTrials
-        return true;
-    }
-
-    // Send prompts
-    std::string leaderName = leader->GetName();
-    std::string warningMsg = "WARNING: This trial involves PERMANENT CHARACTER DEATH if you fail and are not resurrected!";
-    std::string confirmInstructions = "Type '/trialconfirm yes' to accept or '/trialconfirm no' to decline. You have " + std::to_string(ConfirmationTimeoutSeconds) + " seconds to respond.";
-
-    ChatHandler(leader->GetSession()).SendSysMessage("Confirmation requests for the Trial of Finality have been sent to your group members. Waiting for responses...");
-
-    for (const auto& memberGuid : pendingInfo.memberGuidsToConfirm) {
-        Player* member = ObjectAccessor::FindPlayer(memberGuid);
-        if (member && member->GetSession()) {
-            ChatHandler(member->GetSession()).PSendSysMessage("Your group leader, %s, has proposed to start the Trial of Finality!", leaderName.c_str());
-            ChatHandler(member->GetSession()).SendSysMessage(warningMsg);
-            ChatHandler(member->GetSession()).SendSysMessage(confirmInstructions);
-        }
-    }
-    // LogTrialDbEvent for PENDING_START or similar could be added here if desired.
-    return true; // Indicates confirmation phase started successfully
-}
-
-void TrialManager::CheckPlayerLocationsAndEnforceBoundaries(uint32 groupId) {
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) return;
-
-    Position centerPos(ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, 0.0f);
-
-    for (const auto& memberGuid : trialInfo->memberGuids) {
-        Player* member = ObjectAccessor::FindPlayer(memberGuid);
-        // Only check living players who are not GMs in debug mode
-        if (member && member->GetSession() && member->IsAlive() && !(GMDebugEnable && member->GetSession()->GetSecurity() >= SEC_GAMEMASTER)) {
-            bool isOutside = false;
-            if (member->GetMapId() != ArenaMapID) {
-                isOutside = true;
-            } else if (member->GetDistance(centerPos) > ArenaRadius) {
-                isOutside = true;
-            }
-
-            if (isOutside) {
-                if (trialInfo->playersWarnedForLeavingArena.count(memberGuid)) {
-                    // Already warned, now fail the trial.
-                    sLog->outWarn("sys", "[TrialOfFinality] Player %s (Group %u) left the arena after being warned. Failing the trial.",
-                        member->GetName().c_str(), groupId);
-                    std::string reason = member->GetName() + " has fled the Trial of Finality, forfeiting the challenge for the group.";
-                    LogTrialDbEvent(TRIAL_EVENT_PLAYER_FORFEIT_ARENA, groupId, member, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
-                    FinalizeTrialOutcome(groupId, false, reason);
-                    return; // Stop checking once trial is failed
-                } else {
-                    // First warning.
-                    trialInfo->playersWarnedForLeavingArena.insert(memberGuid);
-                    ChatHandler(member->GetSession()).SendSysMessage("WARNING: You have left the trial arena! Return immediately or you will forfeit the trial for your entire group!");
-                    LogTrialDbEvent(TRIAL_EVENT_PLAYER_WARNED_ARENA_LEAVE, groupId, member, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player left arena boundary and was warned.");
-                }
-            }
-        }
-    }
-}
-
-void TrialManager::PrepareAndAnnounceWave(uint32 groupId, int waveNumber, uint32 delayMs) {
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) {
-        sLog->outError("sys", "[TrialOfFinality] PrepareAndAnnounceWave called for group %u but no ActiveTrialInfo found.", groupId);
-        return;
-    }
-
-    trialInfo->currentWave = waveNumber;
-    sLog->outInfo("sys", "[TrialOfFinality] Group %u preparing for wave %d.", groupId, waveNumber);
-    LogTrialDbEvent(TRIAL_EVENT_WAVE_START, groupId, nullptr, waveNumber, trialInfo->highestLevelAtStart, "Announcing wave.");
-
-    // Announcer logic will be more detailed in the announcer's AI script.
-    // For now, we can find/spawn and make it yell.
-    Creature* announcer = nullptr;
-    if (trialInfo->announcerGuid.IsEmpty()) {
-        // Spawn announcer on first wave prep
-        Position announcerPos = { ArenaTeleportX + 5.0f, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO }; // Example position
-        Map* trialMap = sMapMgr->FindMap(ArenaMapID, 0);
-        if(trialMap) {
-            announcer = trialMap->SummonCreature(AnnouncerEntry, announcerPos, TEMPSUMMON_MANUAL_DESPAWN);
-            if (announcer) {
-                trialInfo->announcerGuid = announcer->GetGUID();
-            }
-        }
-    } else {
-        announcer = ObjectAccessor::GetCreature(*sWorld, trialInfo->announcerGuid);
-    }
-
-    if (announcer) {
-        if (auto* ai = dynamic_cast<npc_trial_announcer_ai*>(announcer->AI())) {
-            ai->AnnounceWave(waveNumber);
-        } else {
-            // Fallback for safety
-            std::string waveAnnounce = "Brave contenders, prepare yourselves! Wave " + std::to_string(waveNumber) + " approaches!";
-            announcer->Yell(waveAnnounce, LANG_UNIVERSAL, nullptr);
-        }
-    }
-
-    // Schedule the actual wave spawn
-    sTaskScheduler->Schedule(std::chrono::milliseconds(delayMs), [this, groupId]()
-    {
-        SpawnActualWave(groupId);
-    });
-}
-
-void TrialManager::HandleMonsterKilledInTrial(ObjectGuid monsterGuid, uint32 groupId) {
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) {
-        return;
-    }
-
-    // Erase returns the number of elements removed (0 or 1 for a set)
-    if (trialInfo->activeMonsters.erase(monsterGuid)) {
-        sLog->outDetail("[TrialOfFinality] Group %u killed a trial monster. %lu remaining in wave %d.",
-            groupId, trialInfo->activeMonsters.size(), trialInfo->currentWave);
-
-        if (trialInfo->activeMonsters.empty()) {
-            sLog->outInfo("sys", "[TrialOfFinality] Group %u has cleared wave %d.", groupId, trialInfo->currentWave);
-
-            // Clear any downed players from the previous wave - they are now safe
-            if (!trialInfo->downedPlayerGuids.empty()) {
-                 for(auto const& [guid, time] : trialInfo->downedPlayerGuids) {
-                    Player* p = ObjectAccessor::FindPlayer(guid);
-                    if(p && p->GetSession()) {
-                        ChatHandler(p->GetSession()).SendSysMessage("The wave is over! You have survived... for now.");
-                    }
-                 }
-                trialInfo->downedPlayerGuids.clear();
-            }
-
-            if (trialInfo->currentWave < 5) {
-                // Prepare next wave
-                PrepareAndAnnounceWave(groupId, trialInfo->currentWave + 1, 8000); // 8 second delay between waves
-            } else {
-                // All 5 waves cleared! Success!
-                FinalizeTrialOutcome(groupId, true, "All 5 waves successfully cleared.");
-            }
-        }
-    }
-}
-
-void TrialManager::SpawnActualWave(uint32 groupId) {
-    ActiveTrialInfo* currentTrial = GetActiveTrialInfo(groupId);
-    if (!currentTrial) {
-        sLog->outError("sys", "[TrialOfFinality] SpawnActualWave called for group %u but no ActiveTrialInfo found.", groupId);
-        return;
-    }
-
-    Map* trialMap = sMapMgr->FindMap(ArenaMapID, 0);
-    if (!trialMap) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Could not find trial map %u to spawn wave.", groupId, currentTrial->currentWave, ArenaMapID);
-        FinalizeTrialOutcome(groupId, false, "Internal error: Trial map not found for wave spawn.");
-        return;
-    }
-
-    uint32 activePlayers = 0;
-    for (const auto& memberGuid : currentTrial->memberGuids) {
-        if (!currentTrial->permanentlyFailedPlayerGuids.count(memberGuid)) {
-            Player* player = ObjectAccessor::FindPlayer(memberGuid);
-            if (player && player->IsAlive() && !currentTrial->downedPlayerGuids.count(memberGuid)) {
-                activePlayers++;
-            }
-        }
-    }
-    if (activePlayers == 0 && !currentTrial->memberGuids.empty()) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: No active players left to spawn wave for. Finalizing trial.", groupId, currentTrial->currentWave);
-        FinalizeTrialOutcome(groupId, false, "All players defeated or disconnected before wave " + std::to_string(currentTrial->currentWave) + " could spawn.");
-        return;
-    }
-
-
-    const std::vector<std::vector<uint32>>* currentWaveNpcPool = nullptr;
-    const CustomNpcScalingTier* customScalingTier = nullptr;
-    float healthMultiplier = 1.0f;
-    const std::vector<uint32>* aurasToAdd = nullptr;
-
-    if (currentTrial->currentWave <= 2) {
-        currentWaveNpcPool = &NpcPoolEasy;
-        customScalingTier = &CustomScalingEasy;
-    } else if (currentTrial->currentWave <= 4) {
-        currentWaveNpcPool = &NpcPoolMedium;
-        customScalingTier = &CustomScalingMedium;
-    } else {
-        currentWaveNpcPool = &NpcPoolHard;
-        customScalingTier = &CustomScalingHard;
-    }
-
-    if (NpcScalingMode == "custom_scaling_rules" && customScalingTier) {
-        healthMultiplier = customScalingTier->HealthMultiplier;
-        aurasToAdd = &customScalingTier->AurasToAdd;
-        sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Using CUSTOM scaling rules. HealthMult: %.2f, Auras: %lu",
-            groupId, currentTrial->currentWave, healthMultiplier, (aurasToAdd ? aurasToAdd->size() : 0));
-    }
-
-    if (!currentWaveNpcPool || currentWaveNpcPool->empty()) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Cannot spawn wave. NPC pool for this difficulty is empty.", groupId, currentTrial->currentWave);
-        FinalizeTrialOutcome(groupId, false, "Internal error: NPC pool empty for wave " + std::to_string(currentTrial->currentWave));
-        return;
-    }
-
-    if (WAVE_SPAWN_POSITIONS.empty()) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Cannot spawn wave. No spawn positions are configured or loaded. Check Arena.SpawnPositions in the .conf file.", groupId, currentTrial->currentWave);
-        FinalizeTrialOutcome(groupId, false, "Internal error: No spawn positions configured.");
-        return;
-    }
-    uint32 numSpawnsPerWave = WAVE_SPAWN_POSITIONS.size();
-
-    uint32 numGroupsToSpawn = std::min((uint32)numSpawnsPerWave, activePlayers + 1);
-    numGroupsToSpawn = std::max(numGroupsToSpawn, 1u);
-
-    if (numGroupsToSpawn > currentWaveNpcPool->size()) {
-        sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Requested %u encounter groups, but pool only has %lu. Spawning %lu instead.",
-            groupId, currentTrial->currentWave, numGroupsToSpawn, currentWaveNpcPool->size(), currentWaveNpcPool->size());
-        numGroupsToSpawn = currentWaveNpcPool->size();
-    }
-
-    std::vector<std::vector<uint32>> selectedGroups = *currentWaveNpcPool;
-    std::random_device rd;
-    std::mt19937 g(rd());
-    std::shuffle(selectedGroups.begin(), selectedGroups.end(), g);
-
-    sLog->outInfo("sys", "[TrialOfFinality] Group %u, Wave %d: Spawning %u encounter groups. Highest Lvl: %u. Health Multi: %.2f",
-        groupId, currentTrial->currentWave, numGroupsToSpawn, currentTrial->highestLevelAtStart, healthMultiplier);
-    currentTrial->activeMonsters.clear();
-
-    uint32 spawnPosIndex = 0;
-    uint32 totalCreaturesSpawned = 0;
-
-
-    for (uint32 i = 0; i < numGroupsToSpawn; ++i) {
-        const std::vector<uint32>& groupOfNpcs = selectedGroups[i];
-        if (spawnPosIndex + groupOfNpcs.size() > numSpawnsPerWave) {
-            sLog->outWarn("sys", "[TrialOfFinality] Group %u, Wave %d: Encounter group with %lu members exceeds remaining spawn points (%u). Skipping group.", groupId, currentTrial->currentWave, groupOfNpcs.size(), numSpawnsPerWave - spawnPosIndex);
-            continue;
-        }
-
-        for (uint32 creatureEntry : groupOfNpcs) {
-            const Position& spawnPos = WAVE_SPAWN_POSITIONS[spawnPosIndex++];
-            if (Creature* creature = trialMap->SummonCreature(creatureEntry, spawnPos, TEMPSUMMON_TIMED_DESPAWN_OUT_OF_COMBAT, 3600 * 1000)) {
-                creature->SetLevel(currentTrial->highestLevelAtStart);
-
-                if (healthMultiplier != 1.0f) {
-                    creature->SetMaxHealth(uint32(creature->GetMaxHealth() * healthMultiplier));
-                    creature->SetHealth(creature->GetMaxHealth());
-                }
-
-                if (aurasToAdd) {
-                    for (uint32 auraId : *aurasToAdd) {
-                        creature->AddAura(auraId, creature);
-                    }
-                }
-
-                currentTrial->activeMonsters.insert(creature->GetGUID());
-                totalCreaturesSpawned++;
-                sLog->outDetail("[TrialOfFinality] Group %u, Wave %d: Spawned NPC %u (GUID %s) at %f,%f,%f",
-                    groupId, currentTrial->currentWave, creatureEntry, creature->GetGUID().ToString().c_str(), spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
-            } else {
-                sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn NPC %u at %f,%f,%f",
-                    groupId, currentTrial->currentWave, creatureEntry, spawnPos.GetPositionX(), spawnPos.GetPositionY(), spawnPos.GetPositionZ());
-            }
-        }
-    }
-
-    if (currentTrial->activeMonsters.empty() && !currentWaveNpcPool->empty()) {
-        sLog->outError("sys", "[TrialOfFinality] Group %u, Wave %d: Failed to spawn ANY monsters. Check pool config and spawn positions. Finalizing trial.", groupId, currentTrial->currentWave);
-        FinalizeTrialOutcome(groupId, false, "Internal error: Failed to spawn any NPCs for wave " + std::to_string(currentTrial->currentWave));
-        return;
-    }
-
-    sLog->outInfo("sys", "[TrialOfFinality] Group %u, Wave %d: Spawned a total of %u creatures.", groupId, currentTrial->currentWave, totalCreaturesSpawned);
-}
-
-void TrialManager::HandlePlayerDownedInTrial(Player* downedPlayer) {
-    if (!downedPlayer || !downedPlayer->GetGroup()) return;
-    uint32 groupId = downedPlayer->GetGroup()->GetId();
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) return;
-
-    ObjectGuid playerGuid = downedPlayer->GetGUID();
-    trialInfo->downedPlayerGuids[playerGuid] = time(nullptr);
-
-    sLog->outInfo("sys", "[TrialOfFinality] Player %s (GUID %s, Group %u) has been downed in wave %d.",
-        downedPlayer->GetName().c_str(), playerGuid.ToString().c_str(), groupId, trialInfo->currentWave);
-
-    ChatHandler(downedPlayer->GetSession()).SendSysMessage("You have been defeated! You must be resurrected before the wave ends to avoid permanent failure!");
-    LogTrialDbEvent(TRIAL_EVENT_PLAYER_DEATH_TOKEN, groupId, downedPlayer, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player downed, awaiting resurrection or wave end.");
-
-    // Check if this was the last player
-    uint32 activePlayers = 0;
-    for (const auto& memberGuid : trialInfo->memberGuids) {
-        if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid) && !trialInfo->downedPlayerGuids.count(memberGuid)) {
-            Player* p = ObjectAccessor::FindPlayer(memberGuid);
-            if (p && p->IsAlive()) {
-                activePlayers++;
-            }
-        }
-    }
-
-    if (activePlayers == 0) {
-        sLog->outInfo("sys", "[TrialOfFinality] All players in group %u are downed. Finalizing trial as a failure.", groupId);
-        FinalizeTrialOutcome(groupId, false, "All players were defeated.");
-    }
-}
-
-void TrialManager::FinalizeTrialOutcome(uint32 groupId, bool overallSuccess, const std::string& reason) {
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) {
-        sLog->outWarn("sys", "[TrialOfFinality] FinalizeTrialOutcome called for group %u but no ActiveTrialInfo found. Reason: %s. Trial might have been already cleaned up.",
-            groupId, reason.c_str());
-        m_activeTrials.erase(groupId);
-        return;
-    }
-
-    sLog->outInfo("sys", "[TrialOfFinality] Finalizing trial for group %u. Overall Success: %s. Reason: %s.",
-        groupId, (overallSuccess ? "Yes" : "No"), reason.c_str());
-
-    if (!overallSuccess) {
-        if (!trialInfo->downedPlayerGuids.empty()) {
-            sLog->outDetail("[TrialOfFinality] Group %u trial failed. Processing %lu downed players for perma-death.",
-                groupId, trialInfo->downedPlayerGuids.size());
-            for(const auto& pair : trialInfo->downedPlayerGuids) {
-                ObjectGuid playerGuid = pair.first;
-                if (trialInfo->permanentlyFailedPlayerGuids.count(playerGuid)) { continue; }
-                Player* downedPlayer_obj = ObjectAccessor::FindPlayer(playerGuid);
-
-                // This line should be called for any player who failed this trial instance, for internal tracking (rewards, scaling).
-                trialInfo->permanentlyFailedPlayerGuids.insert(playerGuid);
-
-                if (downedPlayer_obj && downedPlayer_obj->GetSession()) // Player is online
-                {
-                    if (PermaDeathExemptGMs && downedPlayer_obj->GetSession()->GetSecurity() >= SEC_GAMEMASTER) // Check security level (adjust if using different GM levels)
-                    {
-                        sLog->outInfo("sys", "[TrialOfFinality] GM Player %s (GUID %s, Account %u, Group %u) is EXEMPT from perma-death DB flag due to configuration and GM status.",
-                            downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), downedPlayer_obj->GetSession()->GetAccountId(), groupId);
-                        // GM is "down" for the trial's reward/state purposes, but no persistent DB flag.
-                        // Aura cleanup (if any was applied before this new logic)
-                        if (downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) downedPlayer_obj->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
-                    }
-                    else
-                    {
-                        CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
-                            playerGuid.GetCounter());
-
-                        std::string safe_reason = reason;
-                        CharacterDatabase.EscapeString(safe_reason);
-                        LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, downedPlayer_obj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Perma-death DB flag set: " + safe_reason);
-                        sLog->outFatal("[TrialOfFinality] Player %s (GUID %s, Account %u, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).",
-                            downedPlayer_obj->GetName().c_str(), playerGuid.ToString().c_str(), downedPlayer_obj->GetSession()->GetAccountId(), groupId, reason.c_str(), trialInfo->currentWave);
-                        ChatHandler(downedPlayer_obj->GetSession()).SendSysMessage("The trial has ended in failure. Your fate is sealed.");
-                        // Ensure aura is removed as DB is master
-                        if (downedPlayer_obj->HasAura(AURA_ID_TRIAL_PERMADEATH)) downedPlayer_obj->RemoveAura(AURA_ID_TRIAL_PERMADEATH);
-                    }
-                }
-                else // Player is offline
-                {
-                    // For offline players, apply perma-death regardless of GM status for now,
-                    // as reliably checking security level without a session is complex.
-                    // GMs who were offline and failed can use .trial reset.
-                    CharacterDatabase.ExecuteFmt("INSERT INTO character_trial_finality_status (guid, is_perma_failed, last_failed_timestamp) VALUES (%u, 1, NOW()) ON DUPLICATE KEY UPDATE is_perma_failed = 1, last_failed_timestamp = NOW()",
-                        playerGuid.GetCounter());
-
-                    std::string safe_reason_offline = reason;
-                    CharacterDatabase.EscapeString(safe_reason_offline);
-                    LogTrialDbEvent(TRIAL_EVENT_PERMADEATH_APPLIED, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player GUID " + playerGuid.ToString() + " (offline) - Perma-death DB flag set: " + safe_reason_offline);
-                    sLog->outFatal("[TrialOfFinality] Offline Player (GUID %s, Group %u) PERMANENTLY FAILED (DB flag set) due to trial failure: %s (Wave %d).", playerGuid.ToString().c_str(), groupId, reason.c_str(), trialInfo->currentWave);
-                }
-            }
-        }
-        trialInfo->downedPlayerGuids.clear();
-        LogTrialDbEvent(TRIAL_EVENT_TRIAL_FAILURE, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
-    } else { // overallSuccess == true
-        LogTrialDbEvent(TRIAL_EVENT_TRIAL_SUCCESS, groupId, nullptr, trialInfo->currentWave, trialInfo->highestLevelAtStart, reason);
-
-        if (WorldAnnounceEnable) {
-            std::string playerListStr;
-            std::string leaderNameStr = "Unknown Leader";
-            Player* leaderPlayerObj = ObjectAccessor::FindPlayer(trialInfo->leaderGuid);
-            if (leaderPlayerObj) {
-                leaderNameStr = leaderPlayerObj->GetName();
-            }
-            int validWinners = 0;
-            for (const auto& memberGuid : trialInfo->memberGuids) {
-                if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
-                    Player* member = ObjectAccessor::FindPlayer(memberGuid);
-                    if (member && member->GetSession()) {
-                        if (!playerListStr.empty()) { playerListStr += ", "; }
-                        playerListStr += member->GetName();
-                        validWinners++;
-                    }
-                }
-            }
-            if (validWinners > 0 && !WorldAnnounceFormat.empty()) {
-                std::string finalMessage = WorldAnnounceFormat;
-                size_t pos = finalMessage.find("{group_leader}");
-                if (pos != std::string::npos) { finalMessage.replace(pos, strlen("{group_leader}"), leaderNameStr); }
-                pos = finalMessage.find("{player_list}");
-                if (pos != std::string::npos) { finalMessage.replace(pos, strlen("{player_list}"), playerListStr); }
-                sWorld->SendServerMessage(SERVER_MSG_STRING, finalMessage.c_str());
-                sLog->outInfo("sys", "[TrialOfFinality] World announcement made for group %u: %s", groupId, finalMessage.c_str());
-                LogTrialDbEvent(TRIAL_EVENT_WORLD_ANNOUNCEMENT_SUCCESS, groupId, leaderPlayerObj, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Winners: " + playerListStr);
-            } else if (validWinners == 0) {
-                sLog->outInfo("sys", "[TrialOfFinality] World announcement skipped for group %u: No valid online winners found to announce.", groupId);
-            }
-        }
-        TriggerCityNpcCheers(groupId); // New call for 15b
-    }
-    CleanupTrial(groupId, overallSuccess);
-}
-
-void TrialManager::HandleTrialFailure(uint32 groupId, const std::string& reason) {
-    FinalizeTrialOutcome(groupId, false, reason);
-}
-
-void TrialManager::CleanupTrial(uint32 groupId, bool success) {
-    ActiveTrialInfo* trialInfo = GetActiveTrialInfo(groupId);
-    if (!trialInfo) {
-        return;
-    }
-
-    // Despawn any remaining monsters
-    for (const auto& monsterGuid : trialInfo->activeMonsters) {
-        if (Creature* monster = ObjectAccessor::GetCreature(*sWorld, monsterGuid)) {
-            monster->DespawnOrUnsummon();
-        }
-    }
-    trialInfo->activeMonsters.clear();
-
-    // Despawn announcer
-    if (!trialInfo->announcerGuid.IsEmpty()) {
-        if (Creature* announcer = ObjectAccessor::GetCreature(*sWorld, trialInfo->announcerGuid)) {
-            announcer->DespawnOrUnsummon();
-        }
-    }
-
-    // Process all original members
-    for (const auto& memberGuid : trialInfo->memberGuids) {
-        Player* member = ObjectAccessor::FindPlayer(memberGuid);
-        if (member && member->GetSession()) {
-            // Remove token
-            member->DestroyItemCount(TrialTokenEntry, 1, true, false);
-            // Re-enable XP
-            member->SetDisableXpGain(false, true);
-
-            // Teleport out survivors (those not permanently failed)
-            if (!trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) {
-                 ChatHandler(member->GetSession()).SendSysMessage("The Trial of Finality has concluded. You are being teleported out.");
-                 if (ExitOverrideHearthstone) {
-                     member->TeleportTo(ExitMapID, ExitTeleportX, ExitTeleportY, ExitTeleportZ, ExitTeleportO);
-                 } else {
-                     member->TeleportTo(member->GetBindPoint());
-                 }
-            }
-        }
-    }
-
-    // Give rewards on success
-    if (success) {
-        for (const auto& memberGuid : trialInfo->memberGuids) {
-            // Only give rewards to survivors
-            if (trialInfo->permanentlyFailedPlayerGuids.count(memberGuid)) continue;
-
-            Player* member = ObjectAccessor::FindPlayer(memberGuid);
-            if (member && member->GetSession()) {
-                 // Gold Reward
-                if (GoldReward > 0) {
-                    member->ModifyMoney(GoldReward);
-                    ChatHandler(member->GetSession()).PSendSysMessage("You have been awarded %u gold for your victory!", GoldReward / 10000);
-                }
-                // Title Reward
-                if (TitleRewardID > 0) {
-                    if (CharTitlesEntry const* titleEntry = sCharTitlesStore.LookupEntry(TitleRewardID))
-                    {
-                        member->SetTitle(titleEntry);
-                        ChatHandler(member->GetSession()).SendSysMessage("You have been granted a new title!");
-                    }
-                }
-            }
-        }
-    }
-
-    // If it was a test trial with a temporary group, disband it
-    if (trialInfo->isTestTrial) {
-        if (Group* group = sGroupMgr->GetGroupById(groupId)) {
-            sLog->outDetail("[TrialOfFinality] Disbanding temporary test trial group %u.", groupId);
-            group->Disband();
-        }
-    }
-
-    sLog->outInfo("sys", "[TrialOfFinality] Cleaned up trial for group %u.", groupId);
-    // Finally, remove the trial from active map
-    m_activeTrials.erase(groupId);
-}
-
-bool TrialManager::StartTestTrial(Player* gmPlayer) {
-    if (!gmPlayer || !gmPlayer->GetSession() || gmPlayer->GetSession()->GetSecurity() < SEC_GAMEMASTER) {
-        return false;
-    }
-    if (gmPlayer->GetGroup()) {
-        ChatHandler(gmPlayer->GetSession()).SendSysMessage("You cannot start a test trial while in a group.");
-        return false;
-    }
-
-    // Create a temporary, virtual group for the solo GM
-    Group* tempGroup = new Group;
-    tempGroup->Create(gmPlayer->GetGUID());
-    sGroupMgr->AddGroup(tempGroup); // Register group with the manager to prevent memory leak
-    gmPlayer->SetGroup(tempGroup, GRP_STATUS_DEFAULT);
-    uint32 tempGroupId = tempGroup->GetId();
-
-    sLog->outInfo("sys", "[TrialOfFinality] GM %s starting a solo test trial in temporary group %u.", gmPlayer->GetName().c_str(), tempGroupId);
-
-    // Use a simplified initiation path
-    m_activeTrials[tempGroupId] = ActiveTrialInfo(tempGroup, gmPlayer->getLevel());
-    ActiveTrialInfo* newTrial = &m_activeTrials[tempGroupId];
-    newTrial->isTestTrial = true; // Mark for cleanup
-
-    gmPlayer->SetDisableXpGain(true, true);
-    gmPlayer->AddItem(TrialTokenEntry, 1);
-    gmPlayer->TeleportTo(ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO);
-    ChatHandler(gmPlayer->GetSession()).SendSysMessage("Test Trial has begun!");
-
-    LogTrialDbEvent(TRIAL_EVENT_GM_COMMAND_TEST_START, tempGroupId, gmPlayer, 0, newTrial->highestLevelAtStart, "GM test trial started.");
-
-    PrepareAndAnnounceWave(tempGroupId, 1, 5000);
-
-    return true;
-}
 bool TrialManager::ValidateGroupForTrial(Player* leader, Creature* trialNpc) {
     ChatHandler handler(leader->GetSession());
     Group* group = leader->GetGroup();
@@ -1304,7 +874,7 @@ bool TrialManager::ValidateGroupForTrial(Player* leader, Creature* trialNpc) {
             if (result) {
                 Field* fields = result->Fetch();
                 uint32 failedGuid = fields[0].Get<uint32>();
-                Player* failedPlayer = ObjectAccessor::FindPlayer(ObjectGuid::Create<HighGuid::Player>(failedGuid));
+                Player* failedPlayer = ObjectAccessor::FindPlayer(ObjectGuid(HighGuid::Player, failedGuid));
                 std::string failedPlayerName = "Unknown";
                 if(failedPlayer)
                 {
@@ -1332,78 +902,6 @@ bool TrialManager::ValidateGroupForTrial(Player* leader, Creature* trialNpc) {
     }
 
     return true;
-}
-
-void TrialManager::TriggerCityNpcCheers(uint32 /*successfulGroupId*/) {
-    if (!CheeringNpcsEnable || CheeringNpcCityZoneIDs.empty() || ModServerScript::s_cheeringNpcCacheByZone.empty()) {
-        sLog->outDetail("[TrialOfFinality] NPC cheering skipped (disabled, no zones, or empty cache).");
-        return;
-    }
-
-    sLog->outDetail("[TrialOfFinality] Attempting to trigger city NPC cheers using cached NPCs.");
-    std::set<ObjectGuid> alreadyCheeringNpcs;
-    int totalCheeredThisEvent = 0;
-
-    Map::PlayerList const& players = sWorld->GetAllPlayers();
-    if (players.isEmpty()) {
-        sLog->outDetail("[TrialOfFinality] No players online to trigger cheers for.");
-        return;
-    }
-
-    for (auto const& itr : players) {
-        if (totalCheeredThisEvent >= CheeringNpcsMaxTotalWorld) {
-            sLog->outDetail("[TrialOfFinality] Reached max total world cheers (%d). Stopping.", CheeringNpcsMaxTotalWorld);
-            break;
-        }
-
-        Player* player = itr.GetSource();
-        if (!player || !player->GetSession() || !player->IsInWorld() || !player->GetMap()) {
-            continue;
-        }
-
-        uint32 currentZoneId = player->GetZoneId();
-        if (CheeringNpcCityZoneIDs.count(currentZoneId)) {
-            auto cacheIt = ModServerScript::s_cheeringNpcCacheByZone.find(currentZoneId);
-            if (cacheIt == ModServerScript::s_cheeringNpcCacheByZone.end() || cacheIt->second.empty()) {
-                // No NPCs cached for this specific zone, though the zone itself is a cheer zone.
-                continue;
-            }
-
-            const std::vector<ObjectGuid>& zoneNpcGuids = cacheIt->second;
-            int cheeredThisCluster = 0;
-
-            for (const ObjectGuid& npcGuid : zoneNpcGuids) {
-                if (totalCheeredThisEvent >= CheeringNpcsMaxTotalWorld) break;
-                if (cheeredThisCluster >= CheeringNpcsMaxPerPlayerCluster) {
-                    sLog->outDetail("[TrialOfFinality] Reached max cheers for player %s's cluster (%d).", player->GetName().c_str(), CheeringNpcsMaxPerPlayerCluster);
-                    break;
-                }
-                if (alreadyCheeringNpcs.count(npcGuid)) {
-                    continue;
-                }
-
-                Creature* creature = ObjectAccessor::GetCreatureOrPetOrVehicle(*player, npcGuid);
-                if (creature && creature->IsAlive() && !creature->IsInCombat() && player->IsWithinDistInMap(creature, CheeringNpcsRadiusAroundPlayer)) {
-                    // NpcFlag checks were done at caching time, so not strictly needed here
-                    // but could be added if dynamic flags are a concern.
-                    creature->HandleEmoteCommand(EMOTE_ONESHOT_CHEER); // First cheer
-
-                    if (CheeringNpcsCheerIntervalMs > 0) {
-                        m_pendingSecondCheers.push_back({npcGuid, time(nullptr) + (CheeringNpcsCheerIntervalMs / 1000)});
-                    }
-
-                    alreadyCheeringNpcs.insert(npcGuid);
-                    cheeredThisCluster++;
-                    totalCheeredThisEvent++;
-                }
-            }
-        }
-    }
-
-    sLog->outInfo("sys", "[TrialOfFinality] Triggered %d city NPCs to cheer using cache.", totalCheeredThisEvent);
-    if (totalCheeredThisEvent > 0) { // Only log DB event if someone actually cheered
-        LogTrialDbEvent(TRIAL_EVENT_NPC_CHEER_TRIGGERED, 0, nullptr, 0, 0, "Total NPCs cheered (cached): " + std::to_string(totalCheeredThisEvent));
-    }
 }
 
 
@@ -1471,6 +969,21 @@ public:
         return new npc_trial_announcer_ai(creature);
     }
 };
+
+// --- AI for Trial Monsters ---
+struct npc_trial_monster_ai : public ScriptedAI
+{
+    npc_trial_monster_ai(Creature* creature) : ScriptedAI(creature) {}
+
+    void JustDied(Unit* /*killer*/) override
+    {
+        if (auto* instance = (instance_trial_of_finality*)me->GetInstanceScript())
+        {
+            instance->HandleMonsterKilled(me);
+        }
+    }
+};
+
 // --- NPC Scripts ---
 enum FateweaverArithosGossipActions
 {
@@ -1486,6 +999,11 @@ public:
 
     bool OnGossipHello(Player* player, Creature* creature) override
     {
+        if (FateweaverArithosDisplayID != 0)
+        {
+            creature->SetDisplayId(FateweaverArithosDisplayID);
+        }
+
         if (!ModuleEnabled) {
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "The Trial of Finality is currently dormant.", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO + 100);
             SendGossipMenuFor(player, creature->GetGossipMenuId(), creature->GetGUID());
@@ -1504,7 +1022,7 @@ public:
         return true;
     }
 
-    bool OnGossipSelect(Player* player, Creature* creature, uint32 action) override
+    bool OnGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
     {
         ClearGossipMenuFor(player);
         switch(action)
@@ -1516,9 +1034,53 @@ public:
                 break;
             case GOSSIP_ACTION_START_TRIAL:
                 CloseGossipMenuFor(player);
-                if (TrialManager::ValidateGroupForTrial(player, creature)) {
-                    if (!TrialManager::instance()->InitiateTrial(player)) {
-                        // InitiateTrial sends its own messages on failure
+                if (TrialManager::ValidateGroupForTrial(player, creature))
+                {
+                    // Calculate highest level before creating the instance
+                    uint8 highestLevel = 0;
+                    if (Group* group = player->GetGroup())
+                    {
+                        for (GroupReference* itr = group->GetFirstMember(); itr != nullptr; itr = itr->next())
+                        {
+                            if (Player* member = itr->GetSource())
+                            {
+                                if (member->GetSession() && member->getLevel() > highestLevel)
+                                {
+                                    highestLevel = member->getLevel();
+                                }
+                            }
+                        }
+                    }
+
+                    if (highestLevel == 0)
+                    {
+                        sLog->outError("sys", "[TrialOfFinality] Could not start trial for group %u, unable to determine highest level.", player->GetGroup()->GetId());
+                        ChatHandler(player->GetSession()).SendSysMessage("Could not start the trial. Unable to determine the group's highest level.");
+                        return true;
+                    }
+
+                    // Cache the data for the instance script to pick up
+                    TrialManager::instance()->PrepareForInstance(player->GetGroup(), highestLevel);
+
+                    // Create a new private instance for the group
+                    InstanceMap* instanceMap = sMapMgr->CreateNewInstance(ArenaMapID, player, INSTANCE_DIFFICULTY_NORMAL);
+                    if (!instanceMap)
+                    {
+                        sLog->outError("sys", "[TrialOfFinality] Could not create instance map %u for group %u.", ArenaMapID, player->GetGroup()->GetId());
+                        ChatHandler(player->GetSession()).SendSysMessage("An error occurred while preparing the trial arena. Please try again later.");
+                        return true;
+                    }
+
+                    // Teleport all group members to the new instance
+                    for (GroupReference* itr = player->GetGroup()->GetFirstMember(); itr != nullptr; itr = itr->next())
+                    {
+                        if (Player* member = itr->GetSource())
+                        {
+                            if (member->GetSession())
+                            {
+                                member->TeleportTo(ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO, 0, instanceMap->GetInstanceId());
+                            }
+                        }
                     }
                 }
                 // ValidateGroupForTrial sends its own messages on failure
@@ -1535,62 +1097,26 @@ public:
 };
 // --- Player and World Event Scripts ---
 
-class ModWorldScript : public WorldScript
-{
-public:
-    ModWorldScript() : WorldScript("ModTrialOfFinalityWorldScript") { }
-
-    void OnUpdate(uint32 diff) override
-    {
-        if (ModuleEnabled) {
-            TrialManager::instance()->OnUpdate(diff);
-        }
-    }
-};
-
 class ModPlayerScript : public PlayerScript
 {
 public:
     ModPlayerScript() : PlayerScript("ModTrialOfFinalityPlayerScript") {}
 
-    void OnCreatureKill(Player* killer, Creature* killed) override
-    {
-        if (!ModuleEnabled || !killer || !killed || !killer->GetGroup()) return;
-
-        uint32 groupId = killer->GetGroup()->GetId();
-        if (ActiveTrialInfo* trialInfo = TrialManager::instance()->GetActiveTrialInfo(groupId)) {
-            // Check if the killed creature is part of this trial
-            if (trialInfo->activeMonsters.count(killed->GetGUID())) {
-                TrialManager::instance()->HandleMonsterKilledInTrial(killed->GetGUID(), groupId);
-            }
-        }
-    }
-
     void OnPlayerKilledByCreature(Creature* /*killer*/, Player* killed) override
     {
-        if (!ModuleEnabled || !killed || !killed->GetGroup()) return;
-        if (ActiveTrialInfo* trialInfo = TrialManager::instance()->GetActiveTrialInfo(killed->GetGroup()->GetId())) {
-            // Check if player is part of this trial and not already downed/failed
-            if (trialInfo->memberGuids.count(killed->GetGUID()) &&
-                !trialInfo->downedPlayerGuids.count(killed->GetGUID()) &&
-                !trialInfo->permanentlyFailedPlayerGuids.count(killed->GetGUID()))
-            {
-                TrialManager::instance()->HandlePlayerDownedInTrial(killed);
-            }
+        if (!ModuleEnabled) return;
+        if (auto* instance = (instance_trial_of_finality*)killed->GetInstanceScript())
+        {
+            instance->HandlePlayerDowned(killed);
         }
     }
 
     void OnPlayerResurrect(Player* player, float /*percentHealth*/, float /*percentMana*/) override
     {
-        if (!ModuleEnabled || !player || !player->GetGroup()) return;
-        if (ActiveTrialInfo* trialInfo = TrialManager::instance()->GetActiveTrialInfo(player->GetGroup()->GetId())) {
-            // If player was downed, mark them as no longer downed
-            if (trialInfo->downedPlayerGuids.erase(player->GetGUID())) {
-                sLog->outInfo("sys", "[TrialOfFinality] Player %s (GUID %s, Group %u) was resurrected during the trial and is no longer considered downed.",
-                    player->GetName().c_str(), player->GetGUID().ToString().c_str(), player->GetGroup()->GetId());
-                ChatHandler(player->GetSession()).SendSysMessage("You have been resurrected! Your fate is no longer sealed... for now.");
-                LogTrialDbEvent(TRIAL_EVENT_PLAYER_RESURRECTED, player->GetGroup()->GetId(), player, trialInfo->currentWave, trialInfo->highestLevelAtStart, "Player resurrected mid-wave.");
-            }
+        if (!ModuleEnabled) return;
+        if (auto* instance = (instance_trial_of_finality*)player->GetInstanceScript())
+        {
+            instance->HandlePlayerResurrect(player);
         }
     }
 
@@ -1599,11 +1125,13 @@ public:
 
         // Remove stray trial tokens if player logs in and is not in an active trial context
         if (player->HasItemCount(TrialTokenEntry, 1, true)) {
-            if (player->GetMapId() != ArenaMapID) { // Simple check: if not in arena map
+            // This check is now more robust. We check if the player is in ANY instance map.
+            // A player with a token should only ever be inside the trial instance.
+            if (!player->GetMap()->IsDungeon()) {
                 player->DestroyItemCount(TrialTokenEntry, 1, true, false);
-                sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) logged in outside arena with Trial Token; token removed.",
+                sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) logged in outside instance with Trial Token; token removed.",
                     player->GetName().c_str(), player->GetGUID().GetCounter());
-                LogTrialDbEvent(TRIAL_EVENT_STRAY_TOKEN_REMOVED, 0, player, 0, player->getLevel(), "Logged in outside arena with token.");
+                LogTrialDbEvent(TRIAL_EVENT_STRAY_TOKEN_REMOVED, 0, player, 0, player->getLevel(), "Logged in outside instance with token.");
             }
         }
 
@@ -1639,6 +1167,7 @@ public:
         ModuleEnabled = sConfigMgr->GetOption<bool>("TrialOfFinality.Enable", false);
         if (!ModuleEnabled) { sLog->outInfo("sys", "Trial of Finality: Module disabled by configuration."); return; }
         FateweaverArithosEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.FateweaverArithos.EntryID", 0);
+        FateweaverArithosDisplayID = sConfigMgr->GetOption<uint32>("TrialOfFinality.FateweaverArithos.DisplayID", 0);
         AnnouncerEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.Announcer.EntryID", 0);
         TrialTokenEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.TrialToken.EntryID", 0);
         TitleRewardID = sConfigMgr->GetOption<uint32>("TrialOfFinality.TitleReward.ID", 0);
@@ -1983,6 +1512,51 @@ public:
         return commandTable;
     }
 
+    static bool ChatCommand_trial_test(ChatHandler* handler, const char* /*args*/)
+    {
+        Player* gmPlayer = handler->GetPlayer();
+        if (!gmPlayer)
+        {
+            handler->SendSysMessage("You must be a player to use this command.");
+            return false;
+        }
+
+        if (!ModuleEnabled)
+        {
+            ChatHandler(gmPlayer->GetSession()).SendSysMessage("The Trial of Finality module is currently disabled.");
+            return false;
+        }
+
+        if (gmPlayer->GetGroup())
+        {
+            ChatHandler(gmPlayer->GetSession()).SendSysMessage("You cannot start a test trial while in a group.");
+            return false;
+        }
+
+        // Create a temporary, virtual group for the solo GM
+        Group* tempGroup = new Group;
+        tempGroup->Create(gmPlayer->GetGUID());
+        sGroupMgr->AddGroup(tempGroup);
+        gmPlayer->SetGroup(tempGroup, GRP_STATUS_DEFAULT);
+
+        sLog->outInfo("sys", "[TrialOfFinality] GM %s starting a solo test trial in temporary group %u.", gmPlayer->GetName().c_str(), tempGroup->GetId());
+
+        TrialManager::instance()->PrepareForInstance(tempGroup, gmPlayer->getLevel(), true);
+
+        InstanceMap* instanceMap = sMapMgr->CreateNewInstance(ArenaMapID, gmPlayer, INSTANCE_DIFFICULTY_NORMAL);
+        if (!instanceMap)
+        {
+            sLog->outError("sys", "[TrialOfFinality] Could not create instance map %u for GM test trial.", ArenaMapID);
+            ChatHandler(gmPlayer->GetSession()).SendSysMessage("An error occurred while preparing the trial arena.");
+            tempGroup->Disband(); // Clean up the temporary group
+            return true;
+        }
+
+        gmPlayer->TeleportTo(ArenaMapID, ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, ArenaTeleportO, 0, instanceMap->GetInstanceId());
+        handler->SendSysMessage("Test trial initiated successfully. Teleporting to instance.");
+        return true;
+    }
+
     static bool ChatCommand_trial_reset(ChatHandler* handler, const char* args)
     {
         if (!ModuleEnabled) { handler->SendSysMessage("Trial of Finality module is disabled."); return false; }
@@ -2051,22 +1625,6 @@ public:
         handler->SendSysMessage("Trial of Finality status for " + charName + " has been reset.");
         return true;
     }
-
-    static bool ChatCommand_trial_test(ChatHandler* handler, const char* /*args*/)
-    {
-        if (!ModuleEnabled) { handler->SendSysMessage("Trial of Finality module is disabled."); return false; }
-        Player* gmPlayer = handler->GetPlayer();
-        if (!gmPlayer) { handler->SendSysMessage("You must be a player to use this command."); return false; }
-
-        if (TrialManager::instance()->StartTestTrial(gmPlayer)) {
-            handler->SendSysMessage("Test trial initiated successfully.");
-            LogTrialDbEvent(TRIAL_EVENT_GM_COMMAND_TEST_START, (gmPlayer->GetGroup() ? gmPlayer->GetGroup()->GetId() : 0), gmPlayer, 0, gmPlayer->getLevel(), "GM started test trial.");
-             sLog->outInfo("sys", "[TrialOfFinality] GM %s (GUID %u) started a test trial.", gmPlayer->GetName().c_str(), gmPlayer->GetGUID().GetCounter());
-        } else {
-            handler->SendSysMessage("Failed to initiate test trial. Check server logs for details.");
-        }
-        return true;
-    }
 };
 
 // --- Player Command Scripts ---
@@ -2078,14 +1636,10 @@ public:
     std::vector<ChatCommand> GetCommands() const override
     {
         static std::vector<ChatCommand> commandTable;
-
-        if (commandTable.empty()) {
-            commandTable.push_back({ "trialconfirm", SEC_PLAYER, true, &HandleTrialConfirmCommand, "Confirms or denies participation in the Trial of Finality. Usage: /trialconfirm <yes|no>" });
-            commandTable.push_back({ "tc",           SEC_PLAYER, true, &HandleTrialConfirmCommand, "Alias for /trialconfirm. Usage: /tc <yes|no>" });
-            if (ForfeitEnable) {
-                commandTable.push_back({ "trialforfeit", SEC_PLAYER, true, &HandleTrialForfeitCommand, "Votes to forfeit the current Trial of Finality." });
-                commandTable.push_back({ "tf",           SEC_PLAYER, true, &HandleTrialForfeitCommand, "Alias for /trialforfeit." });
-            }
+        if (commandTable.empty() && ForfeitEnable)
+        {
+            commandTable.push_back({ "trialforfeit", SEC_PLAYER, true, &HandleTrialForfeitCommand, "Votes to forfeit the current Trial of Finality." });
+            commandTable.push_back({ "tf",           SEC_PLAYER, true, &HandleTrialForfeitCommand, "Alias for /trialforfeit." });
         }
         return commandTable;
     }
@@ -2093,54 +1647,28 @@ public:
     static bool HandleTrialForfeitCommand(ChatHandler* handler, const char* /*args*/)
     {
         Player* player = handler->GetPlayer();
-        if (!player) {
+        if (!player)
+        {
             handler->SendSysMessage("This command can only be used by a player.");
             return false;
         }
 
-        if (!ModuleEnabled) {
+        if (!ModuleEnabled)
+        {
             ChatHandler(player->GetSession()).SendSysMessage("The Trial of Finality module is currently disabled.");
             return false;
         }
 
-        sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) is attempting to use /trialforfeit command.", player->GetName().c_str(), player->GetGUID().GetCounter());
-        TrialManager::instance()->HandleTrialForfeit(player);
-        return true;
-    }
-
-    static bool HandleTrialConfirmCommand(ChatHandler* handler, const char* args)
-    {
-        Player* player = handler->GetPlayer();
-        if (!player) {
-            // This check is mostly a safeguard; SEC_PLAYER should ensure a player context.
-            handler->SendSysMessage("This command can only be used by a player.");
-            return false;
+        if (auto* instance = (instance_trial_of_finality*)player->GetInstanceScript())
+        {
+            sLog->outDetail("[TrialOfFinality] Player %s (GUID %u) is attempting to use /trialforfeit command inside an instance.", player->GetName().c_str(), player->GetGUID().GetCounter());
+            instance->HandleTrialForfeit(player);
+        }
+        else
+        {
+            ChatHandler(player->GetSession()).SendSysMessage("You can only use this command inside the Trial of Finality.");
         }
 
-        if (!ModuleEnabled) {
-            ChatHandler(player->GetSession()).SendSysMessage("The Trial of Finality module is currently disabled.");
-            return false;
-        }
-
-        if (!player->GetGroup()) {
-            ChatHandler(player->GetSession()).SendSysMessage("You must be in a group to use this command.");
-            return false;
-        }
-
-        std::string argStr = args ? args : "";
-        std::transform(argStr.begin(), argStr.end(), argStr.begin(), ::tolower); // Case-insensitive
-
-        bool accepted;
-        if (argStr == "yes") {
-            accepted = true;
-        } else if (argStr == "no") {
-            accepted = false;
-        } else {
-            ChatHandler(player->GetSession()).SendSysMessage("Usage: /trialconfirm <yes|no>");
-            return false;
-        }
-
-        TrialManager::instance()->HandleTrialConfirmation(player, accepted);
         return true;
     }
 };
@@ -2148,11 +1676,11 @@ public:
 } // namespace ModTrialOfFinality
 
 void Addmod_trial_of_finality_Scripts() {
+    new ModTrialOfFinality::instance_trial_of_finality_loader();
     new ModTrialOfFinality::npc_trial_announcer();
     new ModTrialOfFinality::npc_fateweaver_arithos();
     new ModTrialOfFinality::ModPlayerScript();
     new ModTrialOfFinality::ModServerScript();
-    new ModTrialOfFinality::ModWorldScript();
     new ModTrialOfFinality::trial_commandscript(); // GM commands
     new ModTrialOfFinality::trial_player_commandscript(); // Player commands
 }
