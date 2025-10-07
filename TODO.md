@@ -4,7 +4,7 @@ This file tracks potential future enhancements for the `mod-trial-of-finality` m
 
 ## Architectural & High Priority
 - [ ] **Investigate Instancing:** Research the possibility of converting the trial from an open-world location to a true, private instance for each group. This would solve potential conflicts and wait times if multiple groups want to participate simultaneously.
-- [ ] **More Varied Wave Compositions:** Implement a system to allow for pre-defined "encounter groups" within the NPC pools, allowing for specific combinations of roles (e.g., a healer with two tanks) to be selected as a unit.
+- [x] **More Varied Wave Compositions:** Implement a system to allow for pre-defined "encounter groups" within the NPC pools, allowing for specific combinations of roles (e.g., a healer with two tanks) to be selected as a unit.
 - [ ] **Enhanced Forfeit System:**
     - [ ] Change the forfeit vote from unanimous to majority-based.
     - [ ] Make the required vote threshold (majority vs. unanimous) configurable.
