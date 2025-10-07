@@ -134,6 +134,7 @@ std::vector<Position> WAVE_SPAWN_POSITIONS;
 const uint32 AURA_ID_TRIAL_PERMADEATH = 40000;
 bool ModuleEnabled = false;
 uint32 FateweaverArithosEntry = 0;
+uint32 FateweaverArithosDisplayID = 0;
 uint32 AnnouncerEntry = 0;
 uint32 TrialTokenEntry = 0;
 uint32 TitleRewardID = 0;
@@ -1486,6 +1487,11 @@ public:
 
     bool OnGossipHello(Player* player, Creature* creature) override
     {
+        if (FateweaverArithosDisplayID != 0)
+        {
+            creature->SetDisplayId(FateweaverArithosDisplayID);
+        }
+
         if (!ModuleEnabled) {
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "The Trial of Finality is currently dormant.", GOSSIP_SENDER_MAIN, GOSSIP_ACTION_INFO + 100);
             SendGossipMenuFor(player, creature->GetGossipMenuId(), creature->GetGUID());
@@ -1639,6 +1645,7 @@ public:
         ModuleEnabled = sConfigMgr->GetOption<bool>("TrialOfFinality.Enable", false);
         if (!ModuleEnabled) { sLog->outInfo("sys", "Trial of Finality: Module disabled by configuration."); return; }
         FateweaverArithosEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.FateweaverArithos.EntryID", 0);
+        FateweaverArithosDisplayID = sConfigMgr->GetOption<uint32>("TrialOfFinality.FateweaverArithos.DisplayID", 0);
         AnnouncerEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.Announcer.EntryID", 0);
         TrialTokenEntry = sConfigMgr->GetOption<uint32>("TrialOfFinality.TrialToken.EntryID", 0);
         TitleRewardID = sConfigMgr->GetOption<uint32>("TrialOfFinality.TitleReward.ID", 0);
