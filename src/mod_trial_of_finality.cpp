@@ -5,7 +5,7 @@
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GossipDef.h"
-#include "MapManager.h"
+#include "game/Maps/MapManager.h"
 #include "Group.h"
 #include "Item.h"
 #include "Map.h"
