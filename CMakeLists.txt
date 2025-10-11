@@ -12,15 +12,7 @@ set(MODULE_SOURCES
 add_library(${MODULE_NAME} MODULE ${MODULE_SOURCES})
 
 # Include AzerothCore directories
-target_include_directories(${MODULE_NAME} PRIVATE
-    ${CMAKE_SOURCE_DIR}/src/server
-    ${CMAKE_SOURCE_DIR}/dep/g3dlite/include
-    ${CMAKE_SOURCE_DIR}/dep/gsoap
-    ${CMAKE_SOURCE_DIR}/dep/recastnavigation/Recast/Include
-    ${CMAKE_SOURCE_DIR}/dep/recastnavigation/Detour/Include
-    ${CMAKE_SOURCE_DIR}/dep/recastnavigation/DetourTileCache/Include
-    ${CMAKE_BINARY_DIR}
-)
+target_include_directories(${MODULE_NAME} PRIVATE ${CMAKE_SOURCE_DIR})
 
 # Link against AzerothCore targets
 target_link_libraries(${MODULE_NAME} PRIVATE game shared)
