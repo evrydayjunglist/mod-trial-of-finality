@@ -5,7 +5,7 @@
 #include "Creature.h"
 #include "CreatureAI.h"
 #include "GossipDef.h"
-#include "MapMgr.h"
+#include "Maps/MapMgr.h"
 #include "Group.h"
 #include "Item.h"
 #include "Map.h"
@@ -106,7 +106,10 @@ struct instance_trial_of_finality : public InstanceScript
                     playersWhoVotedForfeit.clear();
                     std::string msg = "The vote to forfeit the trial has failed to pass in time and is now cancelled.";
                     uint32 groupId = 0;
-                    if (Player* p = instance->GetPlayer(0)) { if (p->GetGroup()) groupId = p->GetGroup()->GetId(); }
+                    if (!instance->GetPlayers().isEmpty())
+                        if (Player* p = instance->GetPlayers().begin()->GetSource())
+                            if (p->GetGroup())
+                                groupId = p->GetGroup()->GetId();
                     LogTrialDbEvent(TRIAL_EVENT_FORFEIT_VOTE_CANCEL, groupId, nullptr, currentWave, highestLevelAtStart, "Vote timed out.");
                     DoSendNotifyToInstance(msg.c_str());
                 }
@@ -209,7 +212,10 @@ struct instance_trial_of_finality : public InstanceScript
     {
         currentWave = waveNumber;
         uint32 groupId = 0;
-        if (Player* p = instance->GetPlayer(0)) { if (p->GetGroup()) groupId = p->GetGroup()->GetId(); }
+        if (!instance->GetPlayers().isEmpty())
+            if (Player* p = instance->GetPlayers().begin()->GetSource())
+                if (p->GetGroup())
+                    groupId = p->GetGroup()->GetId();
         sLog->outInfo("sys", "[TrialOfFinality] Instance %u preparing for wave %d.", instance->GetInstanceId(), waveNumber);
         LogTrialDbEvent(TRIAL_EVENT_WAVE_START, groupId, nullptr, waveNumber, highestLevelAtStart, "Announcing wave.");
 
@@ -385,12 +391,10 @@ struct instance_trial_of_finality : public InstanceScript
     {
         uint32 groupId = 0;
         Player* leader = nullptr;
-        if (Player* p = instance->GetPlayer(0))
-        {
-            if (p->GetGroup())
-                groupId = p->GetGroup()->GetId();
-            leader = p; // Use first player as a proxy for logging if needed
-        }
+        if (!instance->GetPlayers().isEmpty())
+            if ((leader = instance->GetPlayers().begin()->GetSource()))
+                if (leader->GetGroup())
+                    groupId = leader->GetGroup()->GetId();
 
         sLog->outInfo("sys", "[TrialOfFinality] Finalizing trial for instance %u. Overall Success: %s. Reason: %s.",
             instance->GetInstanceId(), (overallSuccess ? "Yes" : "No"), reason.c_str());
@@ -493,14 +497,13 @@ struct instance_trial_of_finality : public InstanceScript
         // If it was a test trial with a temporary group, disband it
         if (isTestTrial)
         {
-            if (Player* p = instance->GetPlayer(0))
-            {
-                if (Group* group = p->GetGroup())
-                {
-                    sLog->outDetail("[TrialOfFinality] Disbanding temporary test trial group %u for instance %u.", group->GetId(), instance->GetInstanceId());
-                    group->Disband();
-                }
-            }
+            if (!instance->GetPlayers().isEmpty())
+                if (Player* p = instance->GetPlayers().begin()->GetSource())
+                    if (Group* group = p->GetGroup())
+                    {
+                        sLog->outDetail("[TrialOfFinality] Disbanding temporary test trial group %u for instance %u.", group->GetId(), instance->GetInstanceId());
+                        group->Disband();
+                    }
         }
 
         // The instance will be destroyed automatically when the last player leaves.
@@ -512,7 +515,10 @@ struct instance_trial_of_finality : public InstanceScript
     {
         Position centerPos(ArenaTeleportX, ArenaTeleportY, ArenaTeleportZ, 0.0f);
         uint32 groupId = 0;
-        if (Player* p = instance->GetPlayer(0)) { if (p->GetGroup()) groupId = p->GetGroup()->GetId(); }
+        if (!instance->GetPlayers().isEmpty())
+            if (Player* p = instance->GetPlayers().begin()->GetSource())
+                if (p->GetGroup())
+                    groupId = p->GetGroup()->GetId();
 
         instance->DoForAllPlayers([this, &centerPos, groupId](Player* player)
         {

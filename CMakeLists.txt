@@ -13,8 +13,8 @@ add_library(${MODULE_NAME} MODULE ${MODULE_SOURCES})
 
 # Include AzerothCore directories
 target_include_directories(${MODULE_NAME} PRIVATE
+    ${CMAKE_SOURCE_DIR}/src/server/game
     ${CMAKE_SOURCE_DIR}/src/server
-    ${CMAKE_SOURCE_DIR}/src/server/game/Maps
     ${CMAKE_SOURCE_DIR}/dep/g3dlite/include
     ${CMAKE_SOURCE_DIR}/dep/gsoap
     ${CMAKE_SOURCE_DIR}/dep/recastnavigation/Recast/Include
