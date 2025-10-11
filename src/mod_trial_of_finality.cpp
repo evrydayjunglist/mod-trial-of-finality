@@ -1,22 +1,31 @@
 // AzerothCore includes
-#include "AreaTriggerScript.h"
-#include "Chat.h"
-#include "Config.h"
-#include "Creature.h"
-#include "CreatureAI.h"
-#include "GossipDef.h"
-#include "game/Maps/MapMgr.h"
-#include "Group.h"
-#include "Item.h"
-#include "Map.h"
-#include "ObjectMgr.h"
-#include "Player.h"
-#include "CreatureScript.h"
-#include "ScriptMgr.h"
-#include "WorldSession.h"
-#include "Log.h"
-#include "ChatCommand.h"
-#include "World.h"
+#include "src/server/game/AI/ScriptedAI/ScriptedCreature.h"
+#include "src/server/game/Chat/Chat.h"
+#include "src/server/game/Config/Config.h"
+#include "src/server/game/Entities/Creature/Creature.h"
+#include "src/server/game/AI/CreatureAI.h"
+#include "src/server/game/Gossip/GossipDef.h"
+#include "src/server/game/Maps/MapMgr.h"
+#include "src/server/game/Entities/Group/Group.h"
+#include "src/server/game/Entities/Item/Item.h"
+#include "src/server/game/Maps/Map.h"
+#include "src/server/game/Objects/ObjectMgr.h"
+#include "src/server/game/Entities/Player/Player.h"
+#include "src/server/game/Scripting/ScriptMgr.h"
+#include "src/server/game/Server/WorldSession.h"
+#include "src/common/Logging/Log.h"
+#include "src/server/game/Chat/ChatCommand.h"
+#include "src/server/game/World/World.h"
+#include "src/server/game/Objects/ObjectAccessor.h"
+#include "src/server/game/DBC/DBCStores.h"
+#include "src/server/database/DatabaseEnv.h"
+#include "src/common/Utilities/ObjectGuid.h"
+#include "src/server/game/Cache/CharacterCache.h"
+#include "src/server/game/Scripting/ScriptDefines/InstanceScript.h"
+#include "src/server/scripts/Scripting/ScriptedGossip.h"
+#include "src/server/game/Scripting/ScriptDefines/CreatureScript.h"
+#include "src/server/game/Scripting/ScriptDefines/AreaTriggerScript.h"
+
 
 #include <time.h>
 #include <set>
@@ -28,14 +37,6 @@
 #include <random>
 #include <chrono>
 #include <string>
-
-#include "ObjectAccessor.h"
-#include "Player.h"
-#include "DBCStores.h"
-#include "DatabaseEnv.h"
-#include "ObjectGuid.h"
-#include "CharacterCache.h"
-#include "InstanceScript.h"
 
 // Module specific namespace
 namespace ModTrialOfFinality
