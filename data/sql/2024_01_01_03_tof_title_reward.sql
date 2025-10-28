@@ -1,0 +1,3 @@
+DELETE FROM `CharTitles` WHERE `ID`=100;
+INSERT INTO `CharTitles` (`ID`, `Condition_ID`, `Name_Lang_enUS`, `Name_Lang_enGB`, `Name_Lang_koKR`, `Name_Lang_frFR`, `Name_Lang_deDE`, `Name_Lang_enCN`, `Name_Lang_zhCN`, `Name_Lang_enTW`, `Name_Lang_zhTW`, `Name_Lang_esES`, `Name_Lang_esMX`, `Name_Lang_ruRU`, `Name_Lang_ptPT`, `Name_Lang_ptBR`, `Name_Lang_itIT`, `Mask_ID`) VALUES
+(100, 0, 'Conqueror of Finality', 'Conqueror of Finality', '최후의 정복자', 'Conquérant de la finalité', 'Bezwinger der Endgültigkeit', 'Conqueror of Finality', '最终征服者', 'Conqueror of Finality', '最終征服者', 'Conquistador de la Finalidad', 'Conquistador de la Finalidad', 'Покоритель Окончательности', 'Conquistador da Finalidade', 'Conquistador da Finalidade', 'Conquistatore della Finalità', 99);
